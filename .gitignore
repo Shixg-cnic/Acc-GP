@@ -1,0 +1,58 @@
+# Local builds and CMake output (at every directory depth).
+build*/
+cmake-build*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+compile_commands.json
+Testing/
+_deps/
+*.o
+*.obj
+*.a
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.cubin
+*.ptx
+*.fatbin
+gpart_*
+
+# Input datasets and generated results.
+/data/
+/dataset/
+/results/
+/graph_untils/out/
+*.bin
+*.metis
+*.hierarchy
+*.part
+*.parts
+*.out
+*.log
+
+# Retired experiment and baseline directories.
+/experiments/
+/single_gpu_lp_baseline/
+
+# Python/editor caches.
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+*.swp
+
+# Benchmark datasets and download archives.
+/dataset_benchmark/
+/datasets/
+/downloads/
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.mtx
+*.npy
+*.npz
