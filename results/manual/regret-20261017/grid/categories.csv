@@ -1,0 +1,2 @@
+﻿category,planned_configs,complete_configs,speedup_over_jet_geomean,mean_cut_ratio_over_jet,speedup_over_legacy_geomean,mean_cut_ratio_over_legacy,speedup_over_reference_geomean,mean_cut_ratio_over_reference,mean_ours_cut_fraction,mean_jet_cut_fraction,below_1_15,below_1_2
+Artificial Mesh,6,6,1.708293247336074,1.05818432621793,,,0.9888470210966152,1.0059138127279672,0.0022608582385061065,0.002130965778833729,0,0

@@ -15,7 +15,7 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_RESULTS = PROJECT_ROOT / "results/sclp_repeatability"
+DEFAULT_RESULTS = PROJECT_ROOT.parent / "Acc-GP-archive/experiments/sclp_repeatability"
 
 
 def sha256(path: Path) -> str:
@@ -36,7 +36,7 @@ def main() -> None:
     parser.add_argument("--max-levels", type=int, default=24)
     parser.add_argument(
         "--binary", default=str(
-            PROJECT_ROOT / "build-5090/gpart_coarsen_standard")
+            PROJECT_ROOT / "build/gpart_coarsen_standard")
     )
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--output-dir", default=str(DEFAULT_RESULTS))

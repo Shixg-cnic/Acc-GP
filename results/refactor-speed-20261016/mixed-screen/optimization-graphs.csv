@@ -1,0 +1,2 @@
+name,cases,graphs,speedup_over_old,time_reduction_percent,old_speedup_over_jet,new_speedup_over_jet,mean_cut_change_over_old_percent,mean_cut_change_over_jet_percent,faster_than_old,faster_than_jet,at_least_1_3_over_jet,below_1_15_over_jet,below_1_2_over_jet,mean_cut_ratio_over_jet,mean_new_cut_fraction,mean_jet_cut_fraction
+stokes,3,1,0.8627741169691988,-15.905192370959842,0.8957089476283078,0.7727944963514236,-0.31823736086340854,1.77289674902816,0,0,0,3,3,1.0177289674902816,0.023589078071454477,0.0235185807172527

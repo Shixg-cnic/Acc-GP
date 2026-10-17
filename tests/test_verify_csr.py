@@ -46,4 +46,25 @@ with tempfile.TemporaryDirectory() as temp:
     assert subprocess.run(command, capture_output=True).returncode
     part.write_bytes(array('i', [0]*7).tobytes())
     assert subprocess.run(command, capture_output=True).returncode
+    # Both independent oracles must handle IDs above 31 and agree on strict
+    # integer capacity at the production 128-part limit.
+    offsets, indices = array('q', [0]), array('q')
+    for v in range(1024):
+        indices.extend(sorted([(v - 1) % 1024, (v + 1) % 1024]))
+        offsets.append(len(indices))
+    ptr.write_bytes(offsets.tobytes()); idx.write_bytes(indices.tobytes())
+    for k in [64, 128]:
+        labels = [v // (1024 // k) for v in range(1024)]
+        part.write_bytes(array('i', labels).tobytes())
+        cmd = [binary, str(ptr), str(idx), str(k), str(part), 'binary', '--symmetric']
+        actual = json.loads(subprocess.check_output(cmd, text=True))
+        assert actual == verify(ptr, idx, part, k)
+        assert actual['cut'] == k and actual['capacity_ok']
+    for bad_k in [1, 129]:
+        try:
+            verify(ptr, idx, part, bad_k)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('invalid partition count accepted')
 print('independent_cpp_oracle_ok=1')

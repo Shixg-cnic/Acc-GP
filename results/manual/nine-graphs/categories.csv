@@ -1,0 +1,10 @@
+﻿category,planned_configs,complete_configs,speedup_over_jet_geomean,mean_cut_ratio_over_jet,speedup_over_legacy_geomean,mean_cut_ratio_over_legacy,speedup_over_reference_geomean,mean_cut_ratio_over_reference,mean_ours_cut_fraction,mean_jet_cut_fraction,below_1_15,below_1_2
+Web Crawl,6,6,1.5761784103976384,1.0464984604845822,,,0.9736738921905059,0.9918379402466532,0.006919443171961009,0.006602297374448923,0,0
+Social Network,6,6,1.4800406166928004,1.0177698707223866,,,1.0282723680041768,1.0056042800190907,0.091218015957585,0.0894798410231181,0,0
+Semiconductor,6,6,1.0035548575689768,1.0249193848572813,,,1.0039509188601878,0.9723842332346286,0.019270572128609952,0.01889636802233553,6,6
+Road Network,6,0,,,,,,,,,0,0
+Optimization,6,0,,,,,,,,,0,0
+Finite Element,6,0,,,,,,,,,0,0
+Biology,6,0,,,,,,,,,0,0
+Artificial Mesh,6,0,,,,,,,,,0,0
+Artificial Complex,6,0,,,,,,,,,0,0

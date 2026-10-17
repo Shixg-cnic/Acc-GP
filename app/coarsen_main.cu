@@ -27,8 +27,8 @@ int main(int argc, char** argv) {
         const double stop_contraction_ratio = positional_argc >= 7
             ? std::stod(argv[6]) : 0.90;
         const int max_levels = positional_argc >= 8 ? std::stoi(argv[7]) : 24;
-        if (parts < 2 || parts > 32) {
-            throw std::runtime_error("parts must be between 2 and 32");
+        if (parts < 2 || parts > gpart::kMaxParts) {
+            throw std::runtime_error("parts must be between 2 and 128");
         }
         if (stop_contraction_ratio <= 0.0 || stop_contraction_ratio > 1.0) {
             throw std::runtime_error("invalid coarsening stop ratio");
@@ -36,9 +36,7 @@ int main(int argc, char** argv) {
         if (max_levels <= 0 || max_levels > 200) {
             throw std::runtime_error("invalid coarsening max levels");
         }
-
-        using Types = gpart::ActiveTypes;
-        auto input = gpart::load_weighted_graph<Types>(argv[1], argv[2]);
+        auto input = gpart::load_weighted_graph(argv[1], argv[2]);
         const auto total_start = std::chrono::steady_clock::now();
         gpart::CoarsenOptions options;
         options.parts = parts;
@@ -46,7 +44,22 @@ int main(int argc, char** argv) {
         options.stop_contraction_ratio = stop_contraction_ratio;
         options.max_levels = max_levels;
         options.strict_verify = verify;
-        auto hierarchy = gpart::coarsen<Types>(input, options);
+        const char* matching = std::getenv("GPART_HEM_COARSEN");
+        options.seed_matching = !matching || std::string(matching) != "0";
+        const char* force_regret = std::getenv("GPART_REGRET_FORCE_FULL");
+        options.capacity_safe_fast_path = !force_regret || std::string(force_regret) == "0";
+        const char* requested_mode = std::getenv("GPART_COARSEN_MODE");
+        const std::string mode = requested_mode ? requested_mode : "regret";
+        if (mode != "regret")
+            throw std::runtime_error("Only regret coarsening is maintained; use an archived binary for legacy/residual/sclp comparisons");
+        options.heavy_edge_degree_limit = 64;
+        if (const char* limit = std::getenv("GPART_HEM_DEGREE_LIMIT")) {
+            options.heavy_edge_degree_limit = std::stoi(limit);
+            if (options.heavy_edge_degree_limit < 2 || options.heavy_edge_degree_limit > 256)
+                throw std::runtime_error("GPART_HEM_DEGREE_LIMIT must be between 2 and 256");
+        }
+        auto hierarchy = gpart::coarsen(input, options);
+        const char* method = "regret_capacity";
 
         const bool skip_export =
             std::getenv("ML_SKIP_HIERARCHY_EXPORT") != nullptr;
@@ -62,14 +75,14 @@ int main(int argc, char** argv) {
                   << " coarsest_vertices=" << hierarchy.levels.back().vertices()
                   << " stop_reason=" << hierarchy.stop_reason
                   << " stop_contraction_ratio=" << stop_contraction_ratio
-                  << " method=sclp\n";
+                  << " method=" << method << '\n';
         std::cout << "ml_gpu_device_snapshot_total_seconds="
-                  << hierarchy.snapshot_seconds << " method=sclp\n";
+                  << hierarchy.snapshot_seconds << " method=" << method << '\n';
         std::cout << "ml_total_seconds="
                   << std::chrono::duration<double>(
                          std::chrono::steady_clock::now() - total_start).count()
                   << " hierarchy=" << (skip_export ? "skipped" : argv[4])
-                  << " coarsen_only=1 method=sclp graph_type="
+                  << " coarsen_only=1 method=" << method << " graph_type="
                   << gpart::kActiveGraphName << '\n';
         return 0;
     } catch (const std::exception& error) {

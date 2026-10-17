@@ -36,8 +36,8 @@ double imbalance_of(
 
 }  // namespace
 
-template <typename Types, typename H, typename P>
-DeviceUncoarsenResult<Types> uncoarsen_impl(
+template <typename H, typename P>
+DeviceUncoarsenResult uncoarsen_impl(
     H& hierarchy, P&& coarsest_partition,
     const RefineOptions& options) {
     const auto start = std::chrono::steady_clock::now();
@@ -66,6 +66,10 @@ DeviceUncoarsenResult<Types> uncoarsen_impl(
                   << " admission_iterations=" << stats.admission_iterations
                   << " admission_fallbacks=" << stats.admission_fallbacks
                   << " affinity_counter_bits=" << stats.affinity_counter_bits
+                  << " sparse_affinity=" << stats.sparse_affinity
+                  << " on_demand_affinity=" << stats.on_demand_affinity
+                  << " frontier_vertices_initial=" << stats.frontier_vertices_initial
+                  << " affinity_bytes=" << stats.affinity_bytes
                   << " lp_cut_gain=" << stats.lp_cut_gain
                   << " lp_cut_loss=" << stats.lp_cut_loss
                   << " rebalance_cut_gain=" << stats.rebalance_cut_gain
@@ -105,27 +109,20 @@ DeviceUncoarsenResult<Types> uncoarsen_impl(
     return result;
 }
 
-template <typename Types>
-std::vector<typename Types::VertexT> uncoarsen(
-    const Hierarchy<Types>& hierarchy,
-    const std::vector<typename Types::VertexT>& partition, const RefineOptions& options) {
-    auto result = uncoarsen_impl<Types>(hierarchy, partition, options);
+std::vector<gpart::GraphTypes::VertexT> uncoarsen(
+    const Hierarchy& hierarchy,
+    const std::vector<gpart::GraphTypes::VertexT>& partition, const RefineOptions& options) {
+    auto result = uncoarsen_impl(hierarchy, partition, options);
     return std::move(result.partition);
 }
 
-template <typename Types>
-DeviceUncoarsenResult<Types> uncoarsen(
-    DeviceHierarchy<Types>& hierarchy,
-    thrust::device_vector<typename Types::VertexT>&& partition, const RefineOptions& options) {
-    return uncoarsen_impl<Types>(hierarchy, std::move(partition), options);
+DeviceUncoarsenResult uncoarsen(
+    DeviceHierarchy& hierarchy,
+    thrust::device_vector<gpart::GraphTypes::VertexT>&& partition, const RefineOptions& options) {
+    return uncoarsen_impl(hierarchy, std::move(partition), options);
 }
 
-template std::vector<ActiveTypes::VertexT> uncoarsen<ActiveTypes>(
-    const Hierarchy<ActiveTypes>&,
-    const std::vector<ActiveTypes::VertexT>&,
-    const RefineOptions&);
-template DeviceUncoarsenResult<ActiveTypes> uncoarsen<ActiveTypes>(
-    DeviceHierarchy<ActiveTypes>&, thrust::device_vector<ActiveTypes::VertexT>&&,
-    const RefineOptions&);
+
+
 
 }  // namespace gpart

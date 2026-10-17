@@ -1,6 +1,8 @@
 #pragma once
 
 #include "graph_types.hpp"
+#include "detail/scratch_pool.hpp"
+#include "detail/edge_weight.hpp"
 
 #include <cstdint>
 #include <limits>
@@ -11,11 +13,10 @@
 
 namespace gpart {
 
-template <typename Types>
 struct WeightedGraph {
-    using VertexT = typename Types::VertexT;
-    using OffsetT = typename Types::OffsetT;
-    using WeightT = typename Types::WeightT;
+    using VertexT = gpart::GraphTypes::VertexT;
+    using OffsetT = gpart::GraphTypes::OffsetT;
+    using WeightT = gpart::GraphTypes::WeightT;
 
     std::vector<OffsetT> offsets;
     std::vector<VertexT> neighbors;
@@ -30,19 +31,21 @@ struct WeightedGraph {
     }
 };
 
-template <typename Types>
 struct DeviceWeightedGraph {
-    using VertexT = typename Types::VertexT;
-    using OffsetT = typename Types::OffsetT;
-    using WeightT = typename Types::WeightT;
+    using VertexT = gpart::GraphTypes::VertexT;
+    using OffsetT = gpart::GraphTypes::OffsetT;
+    using WeightT = gpart::GraphTypes::WeightT;
 
-    thrust::device_vector<OffsetT> offsets;
-    thrust::device_vector<VertexT> neighbors;
-    thrust::device_vector<WeightT> edge_weights;
-    thrust::device_vector<WeightT> vertex_weights;
+    detail::ScratchVector<OffsetT> offsets;
+    detail::ScratchVector<VertexT> neighbors;
+    detail::ScratchVector<WeightT> edge_weights;
+    detail::ScratchVector<WeightT> vertex_weights;
+    bool implicit_unit_weights=false;
     // Conservative maximum incident edge-weight sum, carried by coarsening.
     // Unknown graphs retain 64-bit affinity counters; no extra CSR scan is
     // needed to specialize counters when this existing bound is available.
+    std::uint64_t maximum_degree=std::numeric_limits<std::uint64_t>::max();
+    bool has_heavy_rows=true; // Unknown until the coarsener classifies actual row degrees.
     std::uint64_t incident_weight_bound=std::numeric_limits<std::uint64_t>::max();
 
     std::int64_t vertices() const {
@@ -53,29 +56,23 @@ struct DeviceWeightedGraph {
     }
 };
 
-template <typename Types>
-WeightedGraph<Types> load_weighted_graph(
+WeightedGraph load_weighted_graph(
     const std::string& indptr_path, const std::string& indices_path);
 
-template <typename Types>
 void validate_weighted_shape(
-    const WeightedGraph<Types>& graph, bool allow_self_loops);
+    const WeightedGraph& graph, bool allow_self_loops);
 
-template <typename Types>
 void validate_weighted_csr(
-    const WeightedGraph<Types>& graph, bool allow_self_loops);
+    const WeightedGraph& graph, bool allow_self_loops);
 
-template <typename Types>
 std::uint64_t host_cut(
-    const WeightedGraph<Types>& graph,
-    const std::vector<typename Types::VertexT>& labels);
+    const WeightedGraph& graph,
+    const std::vector<gpart::GraphTypes::VertexT>& labels);
 
-template <typename Types>
-DeviceWeightedGraph<Types> make_device_weighted(
-    const WeightedGraph<Types>& graph);
+DeviceWeightedGraph make_device_weighted(
+    const WeightedGraph& graph, bool omit_unit_weights=true);
 
-template <typename Types>
-WeightedGraph<Types> copy_device_weighted(
-    const DeviceWeightedGraph<Types>& graph);
+WeightedGraph copy_device_weighted(
+    const DeviceWeightedGraph& graph);
 
 }  // namespace gpart

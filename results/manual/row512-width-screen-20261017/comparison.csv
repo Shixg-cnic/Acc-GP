@@ -1,0 +1,3 @@
+﻿category,graph,k,status,ours_valid_repeats,ours_seconds,ours_cut,ours_cut_fraction,reference_valid_repeats,reference_seconds,reference_cut,reference_cut_fraction,speedup_over_jet,time_reduction_vs_jet_percent,cut_ratio_over_jet,cut_change_vs_jet_percent,speedup_over_reference,cut_ratio_over_reference,speedup_over_legacy,time_reduction_vs_legacy_percent,cut_ratio_over_legacy,target_status
+Optimization,nlpkkt200,128,complete,5,0.494660041,8412997,0.038950355645161826,5,0.470087627,8394633,0.03886533429889631,,,,,0.9503246432634327,1.0021875881887867,,,,
+Finite Element,af_shell10,128,complete,5,0.081019749,612727,0.0239513676148155,5,0.080476952,611484,0.02390277901019188,,,,,0.9933004359221108,1.0020327596470227,,,,

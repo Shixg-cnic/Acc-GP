@@ -1,0 +1,11 @@
+graph,k,repeat,method,status,verified,seconds,cut,reported_cut,vertices,undirected_edges,capacity,capacity_ok,max_load_ratio,cut_fraction,coarsen_seconds,initial_partition_seconds,uncoarsen_seconds,gpu_uuid,partition_deleted
+toy,2,0,mtmetis,success,False,0.063,4850,4850,16384,172828,8437,True,1,0.028062582451917513,,,,,True
+toy,2,0,kaminpar,verification_error,False,,,,,,8437,,,,,,,,True
+toy,4,0,mtmetis,success,False,0.055,7354,7354,16384,172828,4218,True,1,0.042550975536371424,,,,,True
+toy,4,0,kaminpar,verification_error,False,,,,,,4218,,,,,,,,True
+toy,8,0,mtmetis,success,False,0.066,8566,8566,16384,172828,2109,True,1,0.049563728099613485,,,,,True
+toy,8,0,kaminpar,verification_error,False,,,,,,2109,,,,,,,,True
+toy,16,0,mtmetis,invalid,False,0.086,50394,50394,16384,172828,1054,False,1.876953125,0.29158469692410954,,,,,True
+toy,16,0,kaminpar,verification_error,False,,,,,,1054,,,,,,,,True
+toy,32,0,mtmetis,invalid,False,0.11,103174,103174,16384,172828,527,False,1.869140625,0.5969750271946676,,,,,True
+toy,32,0,kaminpar,verification_error,False,,,,,,527,,,,,,,,True

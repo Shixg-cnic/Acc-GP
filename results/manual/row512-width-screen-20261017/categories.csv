@@ -1,0 +1,3 @@
+﻿category,planned_configs,complete_configs,speedup_over_jet_geomean,mean_cut_ratio_over_jet,speedup_over_legacy_geomean,mean_cut_ratio_over_legacy,speedup_over_reference_geomean,mean_cut_ratio_over_reference,mean_ours_cut_fraction,mean_jet_cut_fraction,below_1_15,below_1_2
+Optimization,1,1,,,,,0.9503246432634327,1.0021875881887867,0.038950355645161826,,0,0
+Finite Element,1,1,,,,,0.9933004359221108,1.0020327596470227,0.0239513676148155,,0,0

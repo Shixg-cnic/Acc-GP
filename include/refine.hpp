@@ -8,17 +8,28 @@
 
 namespace gpart {
 
+enum class RefinementMode { Legacy, Joint, JointPolish };
+
+enum class AffinityLayout { Automatic, Dense, Sparse, OnDemand };
+
 struct RefineOptions {
+    RefinementMode mode = RefinementMode::Legacy;
+    int joint_rounds = 2;
     int parts = 4;
     double imbalance_ratio = 1.03;
     int max_rounds = 32;
     bool strict_verify = false;
+    bool allow_initial_imbalance = false;
     int stale_rounds = 3;
     double refinement_growth_ratio = 2.0;
     int boundary_group_rounds = 2;
+    AffinityLayout affinity_layout = AffinityLayout::Automatic;
+    bool gpu_lp_loop = true; // false keeps the host-controlled reference loop.
+    bool compact_group_keys = true;
 };
 
 struct RefineStats {
+    bool initial_repair_failed = false;
     int rounds = 0;
     std::uint64_t proposals = 0;
     std::uint64_t accepted = 0;
@@ -29,6 +40,10 @@ struct RefineStats {
     int admission_iterations = 0;
     int admission_fallbacks = 0;
     int affinity_counter_bits = 0;
+    bool sparse_affinity = false;
+    bool on_demand_affinity = false;
+    std::uint64_t frontier_vertices_initial = 0;
+    std::uint64_t affinity_bytes = 0;
     // Exact affected-edge deltas, accumulated without additional CSR scans.
     std::uint64_t lp_cut_gain = 0;
     std::uint64_t lp_cut_loss = 0;
@@ -59,10 +74,9 @@ struct RefineLevelResult {
     RefineLevelTimings timings;
 };
 
-template <typename Types>
 struct DeviceUncoarsenResult {
-    std::vector<typename Types::VertexT> partition;
-    thrust::device_vector<typename Types::VertexT> device_partition;
+    std::vector<gpart::GraphTypes::VertexT> partition;
+    thrust::device_vector<gpart::GraphTypes::VertexT> device_partition;
     std::vector<RefineLevelResult> levels;
     std::vector<std::uint64_t> final_part_weights;
     std::uint64_t final_cut = 0;
@@ -70,23 +84,20 @@ struct DeviceUncoarsenResult {
     double final_d2h_seconds = 0.0;
 };
 
-template <typename Types>
 void refine_partition(
-    const WeightedGraph<Types>& graph,
-    std::vector<typename Types::VertexT>& partition,
+    const WeightedGraph& graph,
+    std::vector<gpart::GraphTypes::VertexT>& partition,
     const RefineOptions& options,
     RefineStats* stats = nullptr);
 
-template <typename Types>
-DeviceUncoarsenResult<Types> refine_hierarchy_device(
-    const Hierarchy<Types>& hierarchy,
-    const std::vector<typename Types::VertexT>& coarsest_partition,
+DeviceUncoarsenResult refine_hierarchy_device(
+    const Hierarchy& hierarchy,
+    const std::vector<gpart::GraphTypes::VertexT>& coarsest_partition,
     const RefineOptions& options);
 
-template <typename Types>
-DeviceUncoarsenResult<Types> refine_hierarchy_device(
-    DeviceHierarchy<Types>& hierarchy,
-    thrust::device_vector<typename Types::VertexT>&& coarsest_partition,
+DeviceUncoarsenResult refine_hierarchy_device(
+    DeviceHierarchy& hierarchy,
+    thrust::device_vector<gpart::GraphTypes::VertexT>&& coarsest_partition,
     const RefineOptions& options);
 
 }  // namespace gpart

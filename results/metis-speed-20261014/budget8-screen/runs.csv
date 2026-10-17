@@ -1,0 +1,6 @@
+graph,k,repeat,method,status,verified,seconds,cut,reported_cut,vertices,undirected_edges,capacity,capacity_ok,max_load_ratio,cut_fraction,coarsen_seconds,initial_partition_seconds,uncoarsen_seconds,gpu_uuid,partition_deleted
+wb-edu,4,0,before,unverified,False,0.179820178,,201621,,,,,,,0.106142805,0.012368067,0.056721264,,True
+wb-edu,4,0,after,unverified,False,0.197587756,,217061,,,,,,,0.128452087,0.004955791,0.059295952,,True
+wb-edu,32,0,before,unverified,False,0.25331597,,318974,,,,,,,0.097262159,0.088647889,0.060878618,,True
+wb-edu,32,0,after,unverified,False,0.219848556,,313366,,,,,,,0.119053646,0.03030309,0.062234718,,True
+wb-edu,128,0,before,unverified,False,0.490762604,,366539,,,,,,,0.103569107,0.262889789,0.080979893,,True

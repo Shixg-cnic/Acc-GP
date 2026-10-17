@@ -18,6 +18,7 @@ import subprocess
 import time
 
 from verify_partition import verify
+from result_storage import discard_partition, experiment_path, publish_tables, write_run_table
 
 
 def gpu_info(selection):
@@ -78,7 +79,7 @@ def main():
     parser.add_argument('--indices', type=Path, required=True)
     parser.add_argument('--jet-graph', type=Path, required=True)
     parser.add_argument('--jet', type=Path, required=True)
-    parser.add_argument('--ours', type=Path, default=Path('build-5090/gpart_partition_standard'))
+    parser.add_argument('--ours', type=Path, default=Path('build/gpart_partition_standard'))
     parser.add_argument('--reference', type=Path,
                         help='optional saved production binary, timed under identical conditions')
     parser.add_argument('--output', type=Path, required=True)
@@ -90,8 +91,9 @@ def main():
     parser.add_argument('--oracle', type=Path,
                         help='optional independent CPU CSR oracle (gpart_verify_csr)')
     args = parser.parse_args()
-    if args.repeats < 1 or any(k < 2 or k > 32 for k in args.parts):
-        parser.error('repeats must be positive and 2 <= k <= 32')
+    if args.repeats < 1 or any(k < 2 or k > 128 for k in args.parts):
+        parser.error('repeats must be positive and 2 <= k <= 128')
+    args.output = experiment_path(args.output)
     args.output.mkdir(parents=True, exist_ok=True)
     n = args.indptr.stat().st_size // 8 - 1
     edges = args.indices.stat().st_size // 8
@@ -135,6 +137,11 @@ def main():
                 part, log = args.output/f'{name}.part', args.output/f'{name}.log'
                 metrics = args.output/f'{name}.metrics.json'
                 if method == 'jet':
+                    # Jet appends metrics. Preserve a previous invocation so
+                    # reusing an output directory still produces one JSON run.
+                    if metrics.exists():
+                        metrics.rename(metrics.with_name(
+                            f'{name}.previous-{time.time_ns()}.metrics.json'))
                     command = [str(binaries[method]), str(args.jet_graph.resolve()), str(config.resolve()),
                                str(part.resolve()), str(metrics.resolve())]
                 else:
@@ -174,6 +181,14 @@ def main():
         checked = dict(zip(unique, pool.map(check, unique.values())))
     verified = [dict(checked[identity(run)], method=run['method'], repeat=run['repeat']) for run in runs]
     (args.output/'verified.json').write_text(json.dumps(verified, indent=2)+'\n')
+    for run, exact in zip(runs, verified):
+        run.update(verified=True, exact=exact)
+    (args.output/'runs.json').write_text(json.dumps(runs, indent=2)+'\n')
+    for run in runs:
+        discard_partition(run)
+    (args.output/'runs.json').write_text(json.dumps(runs, indent=2)+'\n')
+    write_run_table(args.output/'runs.csv',runs)
+    publish_tables(args.output)
     summary = []
     for k in args.parts:
         row = dict(parts=k)

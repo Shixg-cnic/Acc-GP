@@ -1,0 +1,2 @@
+﻿category,planned_configs,complete_configs,speedup_over_jet_geomean,mean_cut_ratio_over_jet,speedup_over_legacy_geomean,mean_cut_ratio_over_legacy,speedup_over_reference_geomean,mean_cut_ratio_over_reference,mean_ours_cut_fraction,mean_jet_cut_fraction,below_1_15,below_1_2
+Artificial Complex,6,6,1.9454353638970516,1.002910624061865,,,0.9506916846329639,1.000039200975016,0.5129181934890233,0.5105039349363416,0,0

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "graph_types.hpp"
+
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -11,7 +13,7 @@ namespace gpart {
 // relaxes that constraint on the small graphs used in correctness tests.
 inline std::uint64_t partition_capacity(
     std::uint64_t total, int parts, double imbalance_ratio) {
-    if (parts < 2 || parts > 32 || !std::isfinite(imbalance_ratio) || imbalance_ratio < 1.0)
+    if (parts < 2 || parts > kMaxParts || !std::isfinite(imbalance_ratio) || imbalance_ratio < 1.0)
         throw std::invalid_argument("invalid partition capacity options");
     const long double raw = static_cast<long double>(total) * imbalance_ratio / parts;
     if (!std::isfinite(raw) || raw >= static_cast<long double>(std::numeric_limits<std::uint64_t>::max()))

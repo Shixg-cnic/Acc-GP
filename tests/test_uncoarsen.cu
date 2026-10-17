@@ -1,3 +1,4 @@
+#include <random>
 #include "graph.hpp"
 #include "graph_types.hpp"
 #include "hierarchy.hpp"
@@ -5,7 +6,9 @@
 #include "uncoarsen.hpp"
 #include "coarsen.hpp"
 #include "detail/scratch_pool.hpp"
+#include "detail/scratch_buffer.hpp"
 #include "partition_capacity.hpp"
+#include "../src/coarsen_rows.cuh"
 
 #include <algorithm>
 #include <thrust/sequence.h>
@@ -18,12 +21,11 @@
 
 namespace {
 
-template <typename Types>
-gpart::Hierarchy<Types> make_hierarchy() {
-    using OffsetT = typename Types::OffsetT;
-    using VertexT = typename Types::VertexT;
-    using WeightT = typename Types::WeightT;
-    gpart::WeightedGraph<Types> fine;
+gpart::Hierarchy make_hierarchy() {
+    using OffsetT = gpart::GraphTypes::OffsetT;
+    using VertexT = gpart::GraphTypes::VertexT;
+    using WeightT = gpart::GraphTypes::WeightT;
+    gpart::WeightedGraph fine;
     fine.offsets = {OffsetT{0}, OffsetT{1}, OffsetT{3}, OffsetT{5}, OffsetT{6}};
     fine.neighbors = {
         VertexT{1}, VertexT{0}, VertexT{2},
@@ -33,13 +35,13 @@ gpart::Hierarchy<Types> make_hierarchy() {
         WeightT{5}, WeightT{10}, WeightT{10}};
     fine.vertex_weights = {WeightT{1}, WeightT{1}, WeightT{1}, WeightT{1}};
 
-    gpart::WeightedGraph<Types> coarse;
+    gpart::WeightedGraph coarse;
     coarse.offsets = {OffsetT{0}, OffsetT{1}, OffsetT{2}};
     coarse.neighbors = {VertexT{1}, VertexT{0}};
     coarse.edge_weights = {WeightT{5}, WeightT{5}};
     coarse.vertex_weights = {WeightT{2}, WeightT{2}};
 
-    gpart::Hierarchy<Types> hierarchy;
+    gpart::Hierarchy hierarchy;
     hierarchy.levels.push_back(std::move(fine));
     hierarchy.levels.push_back(std::move(coarse));
     hierarchy.fine_to_coarse.push_back(
@@ -51,16 +53,15 @@ void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
 }
 
-template <typename Types>
 void check_isolated_packing() {
     // Unequal weights include vertices crossing prefix-bin boundaries.
-    gpart::WeightedGraph<Types> host;
+    gpart::WeightedGraph host;
     host.vertex_weights = {7,7,1,4,4,1,1,8,1,3,6,2};
     host.offsets = {0,1,2,2,2,2,2,2,2,2,2,2,2};
     host.neighbors = {1,0};
     host.edge_weights = {3,3};
     auto device = gpart::make_device_weighted(host);
-    gpart::SclpWorkspace<Types> workspace;
+    gpart::SclpWorkspace workspace;
     gpart::SclpStats before_stats, after_stats;
     auto before = gpart::aggregate(device, workspace, 2, 0, 0, before_stats, false, 2, false);
     auto after = gpart::aggregate(device, workspace, 2, 0, 0, after_stats, true, 2, true);
@@ -68,7 +69,7 @@ void check_isolated_packing() {
             "isolated packing failed to contract zero-degree vertices");
     require(after.maximum_weight <= after.capacity,
             "isolated packing exceeded cluster capacity");
-    std::vector<typename Types::VertexT> mapping(after.map.size());
+    std::vector<gpart::GraphTypes::VertexT> mapping(after.map.size());
     thrust::copy(after.map.begin(), after.map.end(), mapping.begin());
     require(mapping[0] != mapping[1], "heavy connected vertices exceeded merge capacity");
     for (std::size_t v = 2; v < mapping.size(); ++v)
@@ -76,14 +77,13 @@ void check_isolated_packing() {
                 "isolated packing joined a connected cluster");
 }
 
-template <typename Types>
 void check_coarsening_frontier() {
-    using W = typename Types::WeightT;
-    using V = typename Types::VertexT;
+    using W = gpart::GraphTypes::WeightT;
+    using V = gpart::GraphTypes::VertexT;
     W scale = 1;
-    if constexpr (sizeof(W) == 8) scale = W{1} << 35;
+
     for (bool parallel : {false, true}) {
-        gpart::WeightedGraph<Types> host;
+        gpart::WeightedGraph host;
         std::vector<std::vector<std::pair<V,W>>> rows(768);
         const auto add = [&](int a, int b, int w) {
             rows[a].push_back({b,scale*w}); rows[b].push_back({a,scale*w});
@@ -105,7 +105,7 @@ void check_coarsening_frontier() {
         }
         auto device = gpart::make_device_weighted(host);
         for (unsigned seed = 0; seed < 3; ++seed) {
-            gpart::SclpWorkspace<Types> fast_ws, full_ws;
+            gpart::SclpWorkspace fast_ws, full_ws;
             gpart::SclpStats fast_stats, full_stats;
             auto fast = gpart::aggregate(device,fast_ws,4,seed,0,fast_stats,false,8,false);
             auto full = gpart::aggregate(device,full_ws,4,seed,0,full_stats,true,8,false);
@@ -123,14 +123,13 @@ void check_coarsening_frontier() {
     }
 }
 
-template <typename Types>
 void check_connected_group_exchange() {
-    using W=typename Types::WeightT;
-    using V=typename Types::VertexT;
-    gpart::WeightedGraph<Types> graph;
+    using W=gpart::GraphTypes::WeightT;
+    using V=gpart::GraphTypes::VertexT;
+    gpart::WeightedGraph graph;
     std::vector<std::vector<std::pair<int,W>>> rows(10);
     W scale=1;
-    if constexpr (sizeof(W)==8) scale=W{1}<<35;
+
     const auto add=[&](int a,int b,int w) {
         rows[a].push_back({b,scale*w});rows[b].push_back({a,scale*w});
     };
@@ -183,13 +182,68 @@ void check_connected_group_exchange() {
 
 }
 
-template <typename Types>
+void check_joint_refinement() {
+    // Two weighted triangles require crossing a negative singleton barrier.
+    // Neither part can accommodate a triangle without simultaneous counterflow.
+    gpart::WeightedGraph graph;
+    std::vector<std::map<int,std::uint32_t>> rows(10);
+    auto add=[&](int a,int b,int w) {rows[a][b]+=w;rows[b][a]+=w;};
+    for(int base : {0,3}) {
+        for(int a=base;a<base+3;++a) for(int b=a+1;b<base+3;++b) add(a,b,10);
+        for(int a=base;a<base+3;++a) add(a,base==0 ? 8 : 6,4);
+    }
+    for(int v=0;v<3;++v) add(v,v+3,1);
+    add(6,7,100);add(8,9,100);
+    graph.vertex_weights={2,2,2,2,2,2,20,20,20,20};graph.offsets={0};
+    for(auto& row:rows) {
+        for(auto [u,w]:row) {graph.neighbors.push_back(u);graph.edge_weights.push_back(w);}
+        graph.offsets.push_back(graph.neighbors.size());
+    }
+    for(auto layout : {gpart::AffinityLayout::Dense,gpart::AffinityLayout::Sparse,gpart::AffinityLayout::OnDemand}) {
+        std::vector<int> labels{0,0,0,1,1,1,0,0,1,1};
+        gpart::RefineOptions options;options.parts=2;options.mode=gpart::RefinementMode::Joint;
+        options.affinity_layout=layout;options.strict_verify=true;options.joint_rounds=4;
+        gpart::RefineStats stats;gpart::refine_partition(graph,labels,options,&stats);
+        require(stats.lp_cut_gain==0 && stats.lp_cut_loss==0,"joint mode unexpectedly ran LP");
+        require(stats.final_cut==3 && gpart::host_cut(graph,labels)==3 && stats.group_cut_gain==24,
+                "joint growth did not cross the negative connected-group barrier");
+    }
+    // Random symmetric weighted inputs, exact initial balance, all supported k.
+    std::mt19937 random(781);
+    for(int k : {4,8,16,32,64,128}) for(int trial=0;trial<3;++trial) {
+        const int n=k*8;
+        gpart::WeightedGraph g;std::vector<std::map<int,std::uint32_t>> edges(n);
+        std::vector<int> initial(n);
+        for(int v=0;v<n;++v) {
+            initial[v]=v/8;g.vertex_weights.push_back(1+v%8);
+            for(int j=0;j<5;++j) {
+                int u=random()%n;if(u==v) continue;
+                auto w=1+random()%100;edges[v][u]+=w;edges[u][v]+=w;
+            }
+        }
+        g.offsets={0};
+        for(auto& row:edges) {
+            for(auto [u,w]:row) {g.neighbors.push_back(u);g.edge_weights.push_back(w);}
+            g.offsets.push_back(g.neighbors.size());
+        }
+        auto labels=initial;gpart::RefineOptions o;o.parts=k;o.strict_verify=true;
+        o.mode=gpart::RefinementMode::Joint;o.joint_rounds=4;
+        o.affinity_layout=trial==0 ? gpart::AffinityLayout::Dense : trial==1 ? gpart::AffinityLayout::Sparse : gpart::AffinityLayout::OnDemand;
+        gpart::RefineStats stats;gpart::refine_partition(g,labels,o,&stats);
+        std::vector<std::uint64_t> loads(k);
+        for(int v=0;v<n;++v) loads[labels[v]]+=g.vertex_weights[v];
+        require(*std::max_element(loads.begin(),loads.end())<=37,"joint random capacity violated");
+        require(stats.final_cut==gpart::host_cut(g,labels) && stats.final_cut<=gpart::host_cut(g,initial),
+                "joint random result violates exact monotonicity");
+    }
+}
+
 void check_heavy_refinement_rows() {
-    using W=typename Types::WeightT;
-    using V=typename Types::VertexT;
+    using W=gpart::GraphTypes::WeightT;
+    using V=gpart::GraphTypes::VertexT;
     constexpr int n=10000;
     W scale=3;
-    if constexpr (sizeof(W)==8) scale=static_cast<W>(std::uint64_t{3}<<35);
+
     std::vector<std::vector<int>> rows(n);
     const auto add=[&](int a,int b) { rows[a].push_back(b);rows[b].push_back(a); };
     // Both hubs exceed the segmented-row threshold and migrate concurrently.
@@ -198,7 +252,7 @@ void check_heavy_refinement_rows() {
     for (int v=5000;v<n;++v) add(0,v);
     for (int v=1;v<5000;++v) add(5000,v);
     for (int v=5001;v<=6000;++v) add(5000,v);
-    gpart::WeightedGraph<Types> graph;
+    gpart::WeightedGraph graph;
     graph.vertex_weights.assign(n,2);
     graph.offsets.push_back(0);
     for (auto& row:rows) {
@@ -211,7 +265,8 @@ void check_heavy_refinement_rows() {
     // Standard: known incident bound selects 32-bit cache; unknown selects
     // 64-bit. Big additionally exercises affinities well above UINT32_MAX.
     for (bool known_bound:{true,false}) {
-        gpart::DeviceHierarchy<Types> hierarchy;
+        options.affinity_layout=known_bound ? gpart::AffinityLayout::OnDemand : gpart::AffinityLayout::Automatic;
+        gpart::DeviceHierarchy hierarchy;
         hierarchy.levels.push_back(gpart::make_device_weighted(graph));
         if (known_bound) hierarchy.levels[0].incident_weight_bound=std::uint64_t(scale)*6000;
         std::vector<V> labels(n);
@@ -227,13 +282,12 @@ void check_heavy_refinement_rows() {
     }
 }
 
-template <typename Types>
 void check_negative_group_prefix() {
-    using V=typename Types::VertexT;
-    using W=typename Types::WeightT;
+    using V=gpart::GraphTypes::VertexT;
+    using W=gpart::GraphTypes::WeightT;
     W scale=1;
-    if constexpr (sizeof(W)==8) scale=W{1}<<35;
-    gpart::WeightedGraph<Types> graph;
+
+    gpart::WeightedGraph graph;
     std::vector<std::vector<std::pair<V,W>>> rows(8);
     const auto add=[&](int a,int b,int w) {
         rows[a].push_back({b,scale*w});rows[b].push_back({a,scale*w});
@@ -265,13 +319,12 @@ void check_negative_group_prefix() {
             "virtual losing prefixes failed to expose a feasible improving group");
 }
 
-template <typename Types>
 void check_collective_group_target() {
-    using V=typename Types::VertexT;
-    using W=typename Types::WeightT;
+    using V=gpart::GraphTypes::VertexT;
+    using W=gpart::GraphTypes::WeightT;
     W scale=1;
-    if constexpr (sizeof(W)==8) scale=W{1}<<35;
-    gpart::WeightedGraph<Types> graph;
+
+    gpart::WeightedGraph graph;
     std::vector<std::vector<std::pair<V,W>>> rows(10);
     const auto add=[&](int a,int b,int w) {
         rows[a].push_back({b,scale*w});rows[b].push_back({a,scale*w});
@@ -301,13 +354,49 @@ void check_collective_group_target() {
             "connected group failed to choose its collective destination");
 }
 
-template <typename Types>
+void check_collective_group_target_high_k() {
+    using V=gpart::GraphTypes::VertexT;using W=gpart::GraphTypes::WeightT;
+    const W scale=W{1};
+    for(int k : {64,128}) {
+        const int source=k-32,destination=k-1,first=1,last=33;
+        gpart::WeightedGraph graph;
+        std::vector<std::vector<std::pair<V,W>>> rows(k+6);
+        const auto add=[&](int a,int b,int w) {
+            rows[a].push_back({b,scale*w});rows[b].push_back({a,scale*w});
+        };
+        add(0,1,20);add(0,4,10);add(0,6,9);add(1,8,10);add(1,6,9);
+        for(int v : {2,4,6,8}) add(v,v+1,100);
+        graph.vertex_weights={1,1,63,63,64,64,64,64,64,64};
+        std::vector<V> original{source,source,source,source,first,first,destination,destination,last,last};
+        for(int p=0;p<k;++p) if(p!=source && p!=first && p!=destination && p!=last) {
+            graph.vertex_weights.push_back(W{128});original.push_back(p);
+        }
+        graph.offsets.push_back(0);
+        for(const auto& row:rows) {
+            for(auto [u,w]:row) {graph.neighbors.push_back(u);graph.edge_weights.push_back(w);}
+            graph.offsets.push_back(graph.neighbors.size());
+        }
+        gpart::RefineOptions options;options.parts=k;options.max_rounds=1;
+        options.affinity_layout=gpart::AffinityLayout::Sparse;
+        options.strict_verify=true;options.boundary_group_rounds=0;
+        auto labels=original;gpart::RefineStats stats;
+        gpart::refine_partition(graph,labels,options,&stats);
+        require(labels==original,"high-k fixture escaped through LP");
+        options.boundary_group_rounds=1;
+        gpart::refine_partition(graph,labels,options,&stats);
+        require(labels[0]==destination && labels[1]==destination && stats.group_accepted==2 &&
+            stats.group_cut_gain==18*static_cast<std::uint64_t>(scale) &&
+            stats.final_cut==20*static_cast<std::uint64_t>(scale) && stats.final_cut==gpart::host_cut(graph,labels),
+            "high-k collective source or destination lost its affinity tile");
+    }
+}
+
 void check_affinity_counter_width() {
-    using V=typename Types::VertexT;
-    using W=typename Types::WeightT;
+    using V=gpart::GraphTypes::VertexT;
+    using W=gpart::GraphTypes::WeightT;
     constexpr std::uint64_t scale=std::uint64_t{1}<<25;
     for (bool wide : {false,true}) {
-        gpart::WeightedGraph<Types> graph;
+        gpart::WeightedGraph graph;
         std::vector<std::vector<std::pair<V,W>>> rows(6);
         const auto add=[&](int a,int b,int w) {
             rows[a].push_back({b,static_cast<W>(scale*w)});
@@ -323,7 +412,7 @@ void check_affinity_counter_width() {
             for (auto [u,w]:row) { graph.neighbors.push_back(u);graph.edge_weights.push_back(w);sum+=w; }
             bound=std::max(bound,sum);graph.offsets.push_back(graph.neighbors.size());
         }
-        gpart::DeviceHierarchy<Types> hierarchy;
+        gpart::DeviceHierarchy hierarchy;
         hierarchy.levels.reserve(2);
         for (int level=0;level<2;++level) {
             auto device=gpart::make_device_weighted(graph);
@@ -347,14 +436,13 @@ void check_affinity_counter_width() {
     }
 }
 
-template <typename Types>
 void check_weight_compatible_groups() {
-    using V=typename Types::VertexT;
-    using W=typename Types::WeightT;
+    using V=gpart::GraphTypes::VertexT;
+    using W=gpart::GraphTypes::WeightT;
     W scale=1;
-    if constexpr (sizeof(W)==8) scale=W{1}<<35;
+
     const auto make=[&](bool solo) {
-        gpart::WeightedGraph<Types> graph;
+        gpart::WeightedGraph graph;
         const int n=solo ? 7 : 11;
         std::vector<std::vector<std::pair<V,W>>> rows(n);
         const auto add=[&](int a,int b,int w) {
@@ -447,10 +535,28 @@ void check_scratch_pool_lifetime() {
     ordered.finish();
 }
 
-template <typename Types>
+void check_overwrite_growth_order() {
+    constexpr std::size_t n=257;
+    std::vector<int> result(n);
+    gpart::detail::ScratchPoolSession pipeline;
+    {
+        gpart::detail::ScratchBuffer<int> source(n),saved(n);
+        CUDA_CHECK(cudaMemsetAsync(thrust::raw_pointer_cast(source.data()),0x37,n*sizeof(int)));
+        CUDA_CHECK(cudaMemcpyAsync(thrust::raw_pointer_cast(saved.data()),thrust::raw_pointer_cast(source.data()),
+            n*sizeof(int),cudaMemcpyDeviceToDevice));
+        source.reserve(2*n);
+        require(source.size()==n,"overwrite reserve changed logical size");
+        source.resize(2*n);
+        CUDA_CHECK(cudaMemsetAsync(thrust::raw_pointer_cast(source.data()),0x51,2*n*sizeof(int)));
+        CUDA_CHECK(cudaMemcpyAsync(result.data(),thrust::raw_pointer_cast(saved.data()),n*sizeof(int),cudaMemcpyDeviceToHost));
+    }
+    pipeline.finish();
+    require(result==std::vector<int>(n,0x37373737),"overwrite growth overtook its pending reader");
+}
+
 void check_parallel_cut() {
-    using V = typename Types::VertexT;
-    using W = typename Types::WeightT;
+    using V = gpart::GraphTypes::VertexT;
+    using W = gpart::GraphTypes::WeightT;
     constexpr int n = 259;
     std::vector<std::vector<V>> rows(n);
     const auto add = [&](int v, int u) { rows[v].push_back(u); rows[u].push_back(v); };
@@ -459,11 +565,11 @@ void check_parallel_cut() {
         add(0, v); // Repeated entries must each contribute their weight.
         if (v > 1) add(v - 1, v);
     }
-    gpart::WeightedGraph<Types> graph;
+    gpart::WeightedGraph graph;
     graph.offsets.push_back(0);
     graph.vertex_weights.assign(n, 1);
     W weight = 7;
-    if constexpr (sizeof(W) == 8) weight = W{1} << 40;
+
     for (auto& row : rows) {
         std::sort(row.begin(), row.end());
         graph.neighbors.insert(graph.neighbors.end(), row.begin(), row.end());
@@ -488,24 +594,23 @@ void check_parallel_cut() {
     }
 }
 
-template <typename Types>
 void check_cross_edge_contraction() {
-    using V = typename Types::VertexT;
-    using W = typename Types::WeightT;
-    using O = typename Types::OffsetT;
+    using V = gpart::GraphTypes::VertexT;
+    using W = gpart::GraphTypes::WeightT;
+    using O = gpart::GraphTypes::OffsetT;
     // Non-warp-aligned row count, empty rows, duplicate entries, self loops,
     // all-internal edges, and repeated calls using the same scratch buffers.
-    gpart::SclpWorkspace<Types> workspace;
-    for (int groups : {7, 1, 7}) {
+    gpart::SclpWorkspace workspace;
+    for (bool unit : {false,true}) for (int groups : {7, 1, 7}) {
         constexpr int n = 35;
-        gpart::WeightedGraph<Types> input, expected;
+        gpart::WeightedGraph input, expected;
         std::vector<V> mapping(n);
         expected.vertex_weights.assign(groups, W{0});
         input.vertex_weights.assign(n, W{1});
         input.offsets.push_back(0);
         std::map<std::pair<V, V>, W> edges;
-        W weight = W{3};
-        if constexpr (sizeof(W) == 8) weight = W{1} << 40;
+        W weight = unit ? W{1} : W{3};
+
         for (int v = 0; v < n; ++v) {
             mapping[v] = v % groups;
             ++expected.vertex_weights[mapping[v]];
@@ -527,7 +632,17 @@ void check_cross_edge_contraction() {
             }
             expected.offsets.push_back(static_cast<O>(expected.neighbors.size()));
         }
-        gpart::DeviceAggregateResult<Types> aggregate;
+        for (bool omit : {false,true}) {
+            auto device=gpart::make_device_weighted(input,omit);
+            require(device.implicit_unit_weights==(unit && omit),"incorrect implicit unit metadata");
+            require(device.edge_weights.size()==(unit && omit ? 0 : input.edges()),
+                    "unit edge weights were not omitted exactly");
+            const auto roundtrip=gpart::copy_device_weighted(device);
+            require(roundtrip.offsets==input.offsets && roundtrip.neighbors==input.neighbors &&
+                    roundtrip.edge_weights==input.edge_weights && roundtrip.vertex_weights==input.vertex_weights,
+                    "implicit/explicit graph round trip differs");
+        }
+        gpart::DeviceAggregateResult aggregate;
         aggregate.map.assign(mapping.begin(), mapping.end());
         aggregate.vertex_weights.assign(expected.vertex_weights.begin(), expected.vertex_weights.end());
         aggregate.coarse_vertices = groups;
@@ -539,14 +654,14 @@ void check_cross_edge_contraction() {
                 "cross-edge contraction differs from independent CPU reduction");
     }
     for (bool empty : {false, true}) {
-        auto input = make_hierarchy<Types>().levels.front();
+        auto input = make_hierarchy().levels.front();
         if (empty) {
             input.neighbors.clear();
             input.edge_weights.clear();
             input.offsets.assign(input.vertices() + 1, 0);
         }
         std::vector<V> identity{0, 1, 2, 3};
-        gpart::DeviceAggregateResult<Types> aggregate;
+        gpart::DeviceAggregateResult aggregate;
         aggregate.coarse_vertices = 4;
         aggregate.map.assign(identity.begin(), identity.end());
         aggregate.vertex_weights.assign(input.vertex_weights.begin(), input.vertex_weights.end());
@@ -559,14 +674,13 @@ void check_cross_edge_contraction() {
     }
 }
 
-template <typename Types>
 void check_sort_weight_width() {
-    using V = typename Types::VertexT;
-    using W = typename Types::WeightT;
+    using V = gpart::GraphTypes::VertexT;
+    using W = gpart::GraphTypes::WeightT;
     // Exercise the hub-sort path, duplicate edges, and the >UINT32_MAX
     // total-weight fallback. Compare every level to the original 64-bit path.
     std::vector<W> tested_weights{W{1}, W{1000000}};
-    if constexpr (sizeof(W) == 8) tested_weights.push_back(W{1} << 40);
+
     for (W weight : tested_weights) {
         constexpr int n = 4096;
         std::vector<std::vector<V>> rows(n);
@@ -574,7 +688,7 @@ void check_sort_weight_width() {
         for (int v = 0; v < n; ++v) add(v, (v + 1) % n);
         for (int v = 1; v <= 512; ++v) add(0, v);
         rows[0].push_back(0); // Hub sentinel must not collide with a packed key.
-        gpart::WeightedGraph<Types> input;
+        gpart::WeightedGraph input;
         input.offsets.push_back(0);
         input.vertex_weights.assign(n, 1);
         for (auto& row : rows) {
@@ -589,7 +703,7 @@ void check_sort_weight_width() {
                 candidate.fine_to_coarse.capacity() >= static_cast<std::size_t>(options.max_levels),
                 "device hierarchy growth can deep-copy previous GPU levels");
         auto reference = gpart::make_device_weighted(input);
-        gpart::SclpWorkspace<Types> workspace; // Default standalone path is 64-bit.
+        gpart::SclpWorkspace workspace; // Default standalone path is 64-bit.
         std::size_t produced = 1;
         for (int level = 0; level < options.max_levels && reference.vertices() > 1024; ++level) {
             gpart::SclpStats stats;
@@ -613,14 +727,14 @@ void check_sort_weight_width() {
     }
 }
 
-template <typename Types>
 void check_receiver_counterflow() {
-    using W=typename Types::WeightT;
-    using V=typename Types::VertexT;
-    gpart::WeightedGraph<Types> graph;
-    std::vector<std::vector<std::pair<int,W>>> rows(256);
+    using W=gpart::GraphTypes::WeightT;
+    using V=gpart::GraphTypes::VertexT;
+    for(int k : {4,64,128}) {
+    gpart::WeightedGraph graph;
+    std::vector<std::vector<std::pair<int,W>>> rows(64*k);
     W scale=1;
-    if constexpr(sizeof(W)==8) scale=W{1}<<35;
+
     const auto add=[&](int a,int b,int w) {
         rows[a].push_back({b,scale*w});rows[b].push_back({a,scale*w});
     };
@@ -629,16 +743,19 @@ void check_receiver_counterflow() {
     for(int v=65;v<128;++v) {add(v,64,4);add(v,128,1);}
     for(int v=129;v<192;++v) add(v,128,100);
     for(int v=193;v<256;++v) add(v,192,100);
-    graph.vertex_weights.assign(256,1);graph.offsets.push_back(0);
+    graph.vertex_weights.assign(64*k,1);graph.offsets.push_back(0);
     for(const auto& row:rows) {
         for(auto [u,w]:row) {graph.neighbors.push_back(u);graph.edge_weights.push_back(w);}
         graph.offsets.push_back(graph.neighbors.size());
     }
-    std::vector<V> labels(256);
-    for(int v=0;v<256;++v) labels[v]=v/64;
+    const int mapping[4]={k==4 ? 0 : k-2,k==4 ? 1 : k-1,k==4 ? 2 : k/2,k==4 ? 3 : 0};
+    std::vector<V> labels;
+    for(int v=0;v<256;++v) labels.push_back(mapping[v/64]);
+    for(int p=0;p<k;++p) if(std::find(mapping,mapping+4,p)==mapping+4)
+        for(int i=0;i<64;++i) labels.push_back(p);
     const auto before=gpart::host_cut(graph,labels);
-    gpart::RefineOptions options;
-    options.parts=4;options.max_rounds=1;options.boundary_group_rounds=0;options.strict_verify=true;
+    gpart::RefineOptions options;options.affinity_layout=gpart::AffinityLayout::Sparse;
+    options.parts=k;options.max_rounds=1;options.boundary_group_rounds=0;options.strict_verify=true;
     gpart::RefineStats stats;
     gpart::refine_partition(graph,labels,options,&stats);
     // Twenty improving LP moves overload part 1. Every repair donor prefers
@@ -647,61 +764,424 @@ void check_receiver_counterflow() {
     require(stats.admission_iterations==1 && stats.admission_fallbacks==0 &&
             stats.final_cut<before && stats.final_cut==gpart::host_cut(graph,labels),
             "receiver tickets failed to finish unit-weight counterflow in one batch");
-    std::uint64_t loads[4]={0,0,0,0};
+    std::vector<std::uint64_t> loads(k,0);
     for(const auto p:labels) ++loads[p];
-    require(*std::max_element(loads,loads+4)<=65,"receiver tickets overfilled a destination");
+    require(*std::max_element(loads.begin(),loads.end())<=65,"receiver tickets overfilled a destination");
+    }
 }
 
-template <typename Types>
 void check_refinement_gain_overflow() {
-    if constexpr (sizeof(typename Types::WeightT) == 8) {
-        gpart::WeightedGraph<Types> graph;
-        graph.offsets = {0, 1, 2};
-        graph.neighbors = {1, 0};
-        const auto weight = static_cast<typename Types::WeightT>(INT64_MAX / 2);
-        graph.edge_weights = {weight, weight};
-        graph.vertex_weights = {1, 1};
-        std::vector<typename Types::VertexT> labels{0, 1};
-        gpart::RefineOptions options;
-        options.parts = 2;
-        bool rejected = false;
-        try { gpart::refine_partition(graph, labels, options); }
-        catch (const std::overflow_error&) { rejected = true; }
-        require(rejected, "refinement accepted an unsafe signed gain range");
 
-        gpart::DeviceHierarchy<Types> hierarchy;
-        hierarchy.levels.push_back(gpart::make_device_weighted(graph));
-        thrust::device_vector<typename Types::VertexT> device_labels = labels;
-        rejected = false;
-        try { gpart::uncoarsen(hierarchy, std::move(device_labels), options); }
-        catch (const std::overflow_error&) { rejected = true; }
-        require(rejected, "coarsest refinement skipped signed gain validation");
-    }
 }
 
 }  // namespace
 
-int main() {
+// A small initial boundary must grow as adjacent vertices move. Strict CSR
+// checks exercise the conservative frontier, both affinity widths, and IDs
+// above 63; small fixtures alone never enable this path.
+void check_frontier_growth() {
+    using V=gpart::GraphTypes::VertexT;using W=gpart::GraphTypes::WeightT;
+    constexpr int n=131072;
+    for(int k : {4,64,128}) {
+        gpart::WeightedGraph graph;graph.offsets.push_back(0);
+        const W scale=W{1};
+        std::vector<V> labels(n);
+        for(int v=0;v<n;++v) {
+            graph.neighbors.push_back((v+n-1)%n);graph.edge_weights.push_back(scale);
+            graph.neighbors.push_back((v+1)%n);graph.edge_weights.push_back(scale);
+            graph.offsets.push_back(graph.neighbors.size());graph.vertex_weights.push_back(W{1});
+            labels[v]=v/(n/k);
+        }
+        for(int p=0;p<k;p+=2) std::swap(labels[p*(n/k)+2],labels[(p+1)*(n/k)+2]);
+        const auto before=gpart::host_cut(graph,labels);
+        const auto original=labels;
+        gpart::RefineOptions options;options.parts=k;options.strict_verify=true;
+        options.max_rounds=4;options.boundary_group_rounds=0;
+        // Explicit sparse mode also exercises a 64-bit weighted cache whose
+        // conservative weight bound would otherwise select dense storage.
+        if(k>4) options.affinity_layout=gpart::AffinityLayout::Sparse;
+        gpart::RefineStats stats;gpart::refine_partition(graph,labels,options,&stats);
+        require(stats.accepted>0 && stats.final_cut<=before &&
+                stats.final_cut==gpart::host_cut(graph,labels),"frontier growth lost cut or active vertices");
+        std::vector<std::uint64_t> loads(k,0);
+        for(auto part:labels) ++loads[part];
+        require(*std::max_element(loads.begin(),loads.end())<=gpart::partition_capacity(n,k,1.03),
+                "frontier refinement exceeded capacity");
+        gpart::DeviceHierarchy hierarchy;
+        auto device_graph=gpart::make_device_weighted(graph);
+        device_graph.incident_weight_bound=2*static_cast<std::uint64_t>(scale);
+        device_graph.has_heavy_rows=false;
+        hierarchy.levels.push_back(std::move(device_graph));
+        thrust::device_vector<V> resident_labels(original);
+        options.affinity_layout=gpart::AffinityLayout::Automatic;
+        options.affinity_layout=gpart::AffinityLayout::OnDemand;
+        const auto resident=gpart::refine_hierarchy_device(hierarchy,std::move(resident_labels),options);
+        std::vector<V> checked(n);
+        thrust::copy(resident.device_partition.begin(),resident.device_partition.end(),checked.begin());
+        require(resident.final_cut<before && resident.final_cut==gpart::host_cut(graph,checked),
+                "resident frontier failed its 32/64-bit CSR check");
+        // Force a repair-only batch on a large layer. Every vertex of the
+        // overloaded source, including interior points, must remain eligible.
+        gpart::DeviceHierarchy repair_hierarchy;
+        auto repair_graph=gpart::make_device_weighted(graph);
+        repair_graph.incident_weight_bound=2*static_cast<std::uint64_t>(scale);
+        repair_graph.has_heavy_rows=false;
+        repair_hierarchy.levels.push_back(std::move(repair_graph));
+        std::vector<V> overloaded(n);
+        for(int v=0;v<n;++v) overloaded[v]=v/(n/k);
+        const auto capacity=gpart::partition_capacity(n,k,1.03);
+        for(int v=0;v<static_cast<int>(capacity-n/k)+3;++v) overloaded[v]=1;
+        thrust::device_vector<V> repair_labels(overloaded);
+        auto repair_options=options;repair_options.max_rounds=0;
+        repair_options.allow_initial_imbalance=true;
+        const auto repaired=gpart::refine_hierarchy_device(repair_hierarchy,std::move(repair_labels),repair_options);
+        thrust::copy(repaired.device_partition.begin(),repaired.device_partition.end(),checked.begin());
+        require(repaired.final_cut==gpart::host_cut(graph,checked) &&
+                *std::max_element(repaired.final_part_weights.begin(),repaired.final_part_weights.end())<=capacity,
+                "compacted donors failed strict large-layer repair");
+    }
+}
+
+void check_heavy_edge_contraction() {
+    using W = gpart::GraphTypes::WeightT;
+    constexpr int active = 131072, n = active + 8;
+    const W edge_scale = sizeof(W) == 8 ? W{1} << 40 : W{1};
+    const W point_scale = sizeof(W) == 8 ? W{1} << 35 : W{1};
+    gpart::WeightedGraph input;
+    input.vertex_weights.assign(n, point_scale); input.offsets.push_back(0);
+    for (int v = 0; v < n; ++v) {
+        std::vector<std::pair<int, W>> row;
+        if (v < active) for (int delta : {-3, -1, 1, 3})
+            row.emplace_back((v + active + delta) % active, edge_scale * (std::abs(delta) == 1 ? 7 : 3));
+        std::sort(row.begin(), row.end());
+        for (auto [u, w] : row) { input.neighbors.push_back(u); input.edge_weights.push_back(w); }
+        input.offsets.push_back(input.neighbors.size());
+    }
+    gpart::CoarsenOptions options;
+    options.max_levels = 1; options.strict_verify = true; options.detailed_timings = false;
+    // Capacity two isolates seed matching from subsequent singleton expansion.
+    options.cluster_size_factor = n / 8;
+    options.seed_matching = true;
+    auto hierarchy = gpart::coarsen(gpart::make_device_weighted(input), options);
+    require(hierarchy.levels.size() == 2, "seeded regret fixture failed to contract");
+    const auto first = gpart::copy_device_weighted(hierarchy.levels[1]);
+    require(*std::max_element(first.vertex_weights.begin(), first.vertex_weights.end()) <= 2 * point_scale,
+            "heavy-edge path merged more than a pair");
+    std::vector<std::int32_t> map(n);
+    thrust::copy(hierarchy.fine_to_coarse[0].begin(), hierarchy.fine_to_coarse[0].end(), map.begin());
+    std::vector<std::vector<int>> members(first.vertices());
+    for (int v = 0; v < n; ++v) members[map[v]].push_back(v);
+    for (const auto& group : members) {
+        require(!group.empty() && group.size() <= 2, "heavy-edge map has an invalid pair size");
+        // Remaining singletons may pair through a common favorite (two-hop).
+    }
+    // A degree-34 ring exercises the warp-per-row path, with weighted
+    // matching and exact local/global CSR contraction checked independently.
+    gpart::WeightedGraph medium;
+    medium.vertex_weights.assign(n, point_scale); medium.offsets.push_back(0);
+    for (int v = 0; v < n; ++v) {
+        std::vector<std::pair<int, W>> row;
+        if (v < active) for (int d = -17; d <= 17; ++d) if (d)
+            row.emplace_back((v + active + d) % active,
+                edge_scale * (std::abs(d) == 1 ? 7 : 1));
+        std::sort(row.begin(), row.end());
+        for (auto [u, w] : row) { medium.neighbors.push_back(u); medium.edge_weights.push_back(w); }
+        medium.offsets.push_back(medium.neighbors.size());
+    }
+    options.max_levels = 1; options.heavy_edge_degree_limit = 64;
+    options.row_local_contraction = false;
+    auto global = gpart::coarsen(gpart::make_device_weighted(medium), options);
+    options.row_local_contraction = true;
+    auto local = gpart::coarsen(gpart::make_device_weighted(medium), options);
+    require(global.levels.size() == 2 && local.levels.size() == 2,
+            "warp matching failed to contract medium-degree graph");
+    const auto gm = gpart::copy_device_weighted(global.levels[1]);
+    const auto lm = gpart::copy_device_weighted(local.levels[1]);
+    require(*std::max_element(gm.vertex_weights.begin(), gm.vertex_weights.end()) <= 2 * point_scale,
+            "warp matching merged more than a pair");
+    require(gm.offsets == lm.offsets && gm.neighbors == lm.neighbors &&
+        gm.edge_weights == lm.edge_weights && gm.vertex_weights == lm.vertex_weights,
+        "warp matching local/global contraction mismatch");
+    std::vector<std::int32_t> medium_map(n), global_map(n);
+    thrust::copy(local.fine_to_coarse[0].begin(), local.fine_to_coarse[0].end(), medium_map.begin());
+    thrust::copy(global.fine_to_coarse[0].begin(), global.fine_to_coarse[0].end(), global_map.begin());
+    require(medium_map == global_map, "warp matching is not deterministic");
+    // A sparse star's hub must skip seeding and retain regret aggregation.
+    constexpr int star_n = 65544;
+    gpart::WeightedGraph star;
+    star.vertex_weights.assign(star_n, W{1}); star.offsets.push_back(0);
+    for (int v = 0; v < star_n; ++v) {
+        if (!v) for (int u = 1; u < star_n; ++u) { star.neighbors.push_back(u); star.edge_weights.push_back(1); }
+        else { star.neighbors.push_back(0); star.edge_weights.push_back(1); }
+        star.offsets.push_back(star.neighbors.size());
+    }
+    options.max_levels = 1;
+    auto fallback = gpart::coarsen(gpart::make_device_weighted(star), options);
+    options.seed_matching = false;
+    auto reference = gpart::coarsen(gpart::make_device_weighted(star), options);
+    require(fallback.levels.size() == reference.levels.size() &&
+            fallback.stop_reason == reference.stop_reason, "seed eligibility changed regret stopping");
+    gpart::WeightedGraph isolated;
+    isolated.offsets.assign(star_n + 1, 0); isolated.vertex_weights.assign(star_n, W{1});
+    options.seed_matching = true;
+    auto rejected = gpart::coarsen(gpart::make_device_weighted(isolated), options);
+    options.seed_matching = false;
+    auto isolated_reference = gpart::coarsen(gpart::make_device_weighted(isolated), options);
+    require(rejected.levels.size() == isolated_reference.levels.size() &&
+            rejected.stop_reason == isolated_reference.stop_reason,
+            "empty seed pass changed regret stopping");
+}
+
+void check_short_row_sort() {
+    using O = gpart::GraphTypes::OffsetT;
+    using W = gpart::GraphTypes::WeightT;
+    std::vector<O> offsets{0};
+    std::vector<std::int32_t> neighbors;
+    std::vector<W> weights;
+    std::vector<std::map<std::int32_t, std::uint64_t>> expected;
+    for (int degree : {0, 1, 7, 31, 32, 33, 63, 64, 126, 127, 128, 129, 255, 256, 257, 511, 512, 3}) {
+        expected.emplace_back();
+        for (int i = 0; i < degree; ++i) {
+            const int target = degree == 126 ? 13 :
+                (i % 5 == 0 ? INT32_MAX : ((degree - i) * 13) % 19);
+            const W weight = sizeof(W) == 8 ? (W{1} << 40) + i : W{1} + i;
+            neighbors.push_back(target); weights.push_back(weight);
+            if (target != INT32_MAX) expected.back()[target] += weight;
+        }
+        offsets.push_back(neighbors.size());
+    }
+    gpart::detail::ScratchVector<O> d_offsets(offsets), counts(expected.size());
+    gpart::detail::ScratchVector<std::int32_t> d_neighbors(neighbors);
+    gpart::detail::ScratchVector<W> d_weights(weights);
+    gpart::contraction_sort_rows<<<3, 256>>>(expected.size(),
+        thrust::raw_pointer_cast(d_offsets.data()), thrust::raw_pointer_cast(d_neighbors.data()),
+        thrust::raw_pointer_cast(d_weights.data()), thrust::raw_pointer_cast(counts.data()));
+    gpart::contraction_sort_rows<true><<<3, 256>>>(expected.size(),
+        thrust::raw_pointer_cast(d_offsets.data()), thrust::raw_pointer_cast(d_neighbors.data()),
+        thrust::raw_pointer_cast(d_weights.data()), thrust::raw_pointer_cast(counts.data()));
+    CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize());
+    std::vector<O> actual_counts(expected.size());
+    thrust::copy(counts.begin(), counts.end(), actual_counts.begin());
+    thrust::copy(d_neighbors.begin(), d_neighbors.end(), neighbors.begin());
+    thrust::copy(d_weights.begin(), d_weights.end(), weights.begin());
+    for (std::size_t row = 0; row < expected.size(); ++row) {
+        require(actual_counts[row] == expected[row].size(), "short-row unique degree mismatch");
+        auto e = offsets[row];
+        for (auto [target, weight] : expected[row]) {
+            require(neighbors[e] == target && weights[e] == weight,
+                    "short-row sorting/reduction differs from independent CPU map");
+            ++e;
+        }
+    }
+}
+
+void check_row_local_contraction(bool long_rows = false) {
+    using W = gpart::GraphTypes::WeightT;
+    constexpr int active = 131072, n = active + 3;
+    gpart::WeightedGraph input;
+    input.vertex_weights.assign(n, 1); input.offsets.push_back(0);
+    for (int v = 0; v < n; ++v) {
+        std::vector<int> row;
+        if (v < active) {
+            if (long_rows) {
+                for (int delta = -65; delta <= 65; ++delta)
+                    if (delta) row.push_back((v + active + delta) % active);
+            } else for (int delta : {-3, -1, 1, 3}) row.push_back((v + active + delta) % active);
+            if (v < 2) { row.push_back(1-v); row.push_back(v); }
+        }
+        std::sort(row.begin(), row.end());
+        for (auto u : row) { input.neighbors.push_back(u); input.edge_weights.push_back(W{1}); }
+        input.offsets.push_back(input.neighbors.size());
+    }
+    gpart::CoarsenOptions options;
+    options.max_levels = long_rows ? 1 : 2;
+    if (long_rows) options.cluster_size_factor = n / 8; // capacity at most three for the padded fixture
+    options.strict_verify = true; options.detailed_timings = false;
+    options.row_local_contraction = false;
+    auto reference = gpart::coarsen(gpart::make_device_weighted(input), options);
+    options.row_local_contraction = true;
+    auto actual = gpart::coarsen(gpart::make_device_weighted(input), options);
+    require(actual.levels.size() == reference.levels.size() && actual.levels.size() == (long_rows ? 2 : 3),
+            "short-row contraction changed hierarchy depth");
+    for (std::size_t level = 0; level < actual.levels.size(); ++level) {
+        auto a = gpart::copy_device_weighted(actual.levels[level]);
+        auto b = gpart::copy_device_weighted(reference.levels[level]);
+        require(a.offsets == b.offsets && a.neighbors == b.neighbors &&
+                a.edge_weights == b.edge_weights && a.vertex_weights == b.vertex_weights,
+                "short-row contraction changed complete CSR or weights");
+        if (level < actual.fine_to_coarse.size()) {
+            std::vector<std::int32_t> a_map(actual.fine_to_coarse[level].size()), b_map(a_map.size());
+            thrust::copy(actual.fine_to_coarse[level].begin(), actual.fine_to_coarse[level].end(), a_map.begin());
+            thrust::copy(reference.fine_to_coarse[level].begin(), reference.fine_to_coarse[level].end(), b_map.begin());
+            require(a_map == b_map, "short-row contraction changed SCLP mapping");
+        }
+    }
+}
+
+
+
+void check_precombined_contraction() {
+    using W=gpart::GraphTypes::WeightT;
+    using V=gpart::GraphTypes::VertexT;
+    constexpr int n=4099;
+    const W weight=sizeof(W)==8 ? W{1}<<20 : W{7};
+    gpart::WeightedGraph input;
+    input.vertex_weights.assign(n,1);input.offsets.push_back(0);
+    for (int v=0;v<n;++v) {
+        // More than 2^20 entries select the compact path. Repeated targets
+        // span chunk boundaries; the two extra reciprocal edges make partial
+        // final chunks, and Big exercises the 64-bit group summation.
+        for (int d : {-1,1}) for (int j=0;j<128;++j) {
+            input.neighbors.push_back((v+n+d)%n);input.edge_weights.push_back(weight);
+        }
+        if (v<2) { input.neighbors.push_back(1-v);input.edge_weights.push_back(weight); }
+        input.offsets.push_back(input.neighbors.size());
+    }
+    gpart::CoarsenOptions options;options.max_levels=1;options.strict_verify=true;
+    auto hierarchy=gpart::coarsen(gpart::make_device_weighted(input),options);
+    require(hierarchy.levels.size()==2,"precombined contraction fixture did not contract");
+    const auto actual=gpart::copy_device_weighted(hierarchy.levels[1]);
+    std::vector<V> map(n);
+    thrust::copy(hierarchy.fine_to_coarse[0].begin(),hierarchy.fine_to_coarse[0].end(),map.begin());
+    std::vector<std::map<V,std::uint64_t>> rows(actual.vertices());
+    std::vector<std::uint64_t> masses(actual.vertices(),0);
+    for (int v=0;v<n;++v) {
+        ++masses[map[v]];
+        for (auto e=input.offsets[v];e<input.offsets[v+1];++e)
+            if (map[v]!=map[input.neighbors[e]]) rows[map[v]][map[input.neighbors[e]]]+=input.edge_weights[e];
+    }
+    for (int v=0;v<actual.vertices();++v) {
+        auto e=actual.offsets[v];
+        require(masses[v]==actual.vertex_weights[v],"precombined contraction changed mass");
+        for (const auto& [u,w] : rows[v]) {
+            require(e<actual.offsets[v+1] && actual.neighbors[e]==u && actual.edge_weights[e]==w,
+                    "precombined contraction differs from complete CPU row reduction");
+            ++e;
+        }
+        require(e==actual.offsets[v+1],"precombined contraction emitted extra edges");
+    }
+}
+
+void check_gpu_lp_control() {
+    using W=gpart::GraphTypes::WeightT;
+    using V=gpart::GraphTypes::VertexT;
+    W scale=1;
+
+    gpart::WeightedGraph graph;
+    constexpr int n=65536;
+    graph.vertex_weights.assign(n,scale);
+    graph.offsets.push_back(0);
+    for (int v=0;v<n;++v) {
+        graph.neighbors.push_back((v/4)*4+3-v%4);
+        graph.edge_weights.push_back(scale*10);
+        graph.offsets.push_back(graph.neighbors.size());
+    }
+    for (auto layout : {gpart::AffinityLayout::Dense,gpart::AffinityLayout::Sparse,gpart::AffinityLayout::OnDemand}) {
+        gpart::RefineOptions options;
+        options.parts=2;options.strict_verify=true;
+        options.boundary_group_rounds=0;options.affinity_layout=layout;
+        std::vector<V> host(n);
+        for (int v=0;v<n;++v) host[v]=v%2;
+        auto device=host;
+        gpart::RefineStats a,b;
+        options.gpu_lp_loop=false;
+        gpart::refine_partition(graph,host,options,&a);
+        options.gpu_lp_loop=true;
+        gpart::refine_partition(graph,device,options,&b);
+        require(host==device && b.final_cut==0 && b.final_cut==gpart::host_cut(graph,device),
+                "GPU LP loop differs on deterministic reciprocal moves");
+        require(a.rounds==b.rounds && a.accepted==b.accepted &&
+                a.checkpoint_updates==b.checkpoint_updates && b.checkpoint_updates>0 &&
+                a.lp_cut_gain==b.lp_cut_gain && a.lp_cut_loss==b.lp_cut_loss,
+                "GPU LP checkpoint/empty-round control differs from host reference");
+    }
+}
+
+int main(int argc,char** argv) {
     try {
+        if(argc==2 && std::string(argv[1])=="--joint-only") {
+            check_joint_refinement();
+            std::cout << "joint_refinement_ok=1\n";
+            return 0;
+        }
+        check_overwrite_growth_order();
         check_scratch_pool_lifetime();
         gpart::detail::ScratchPoolSession scratch_pool;
         check_scratch_pool_lifetime();
-        using Types = gpart::ActiveTypes;
-        using VertexT = typename Types::VertexT;
-        check_parallel_cut<Types>();
-        check_refinement_gain_overflow<Types>();
-        check_receiver_counterflow<Types>();
-        check_cross_edge_contraction<Types>();
-        check_sort_weight_width<Types>();
-        check_isolated_packing<Types>();
-        check_coarsening_frontier<Types>();
-        check_connected_group_exchange<Types>();
-        check_heavy_refinement_rows<Types>();
-        check_collective_group_target<Types>();
-        check_negative_group_prefix<Types>();
-        check_affinity_counter_width<Types>();
-        check_weight_compatible_groups<Types>();
-        auto hierarchy = make_hierarchy<Types>();
+        check_heavy_edge_contraction();
+        check_short_row_sort();
+        check_row_local_contraction();
+        check_row_local_contraction(true);
+        check_gpu_lp_control();
+        check_precombined_contraction();
+        check_frontier_growth();
+        { // Resident arrays must keep their allocating pool alive after its
+          // session ends; refinement can then use a different allocation scope.
+            gpart::WeightedGraph ring;
+            ring.vertex_weights.assign(1024,1);ring.offsets.push_back(0);
+            for (int v=0;v<1024;++v) {
+                ring.neighbors.push_back((v+1023)%1024);
+                ring.neighbors.push_back((v+1)%1024);
+                ring.edge_weights.push_back(1);ring.edge_weights.push_back(1);
+                ring.offsets.push_back(ring.neighbors.size());
+            }
+            gpart::DeviceHierarchy retained;
+            {
+                gpart::detail::ScratchPoolSession pool;
+                gpart::CoarsenOptions o;o.parts=4;o.cluster_size_factor=8;o.strict_verify=true;
+                retained=gpart::coarsen(gpart::make_device_weighted(ring),o);
+                pool.finish();
+            }
+            require(retained.levels.size()>1,"pool lifetime test did not build coarse arrays");
+            const auto saved=gpart::copy_device_weighted(retained.levels.back());
+            require(saved.vertices()>0,"retained graph invalid after pool session");
+            thrust::device_vector<gpart::GraphTypes::VertexT> labels(saved.vertices(),0);
+            gpart::RefineOptions o;o.parts=4;o.allow_initial_imbalance=true;
+            o.strict_verify=true;o.max_rounds=0;o.boundary_group_rounds=0;
+            auto r=gpart::refine_hierarchy_device(retained,std::move(labels),o);
+            require(*std::max_element(r.final_part_weights.begin(),r.final_part_weights.end())<=263,
+                    "pool lifetime refinement exceeded capacity");
+        }
+
+        { // Coarse weight-two points cannot fit cap=3; finer units can.
+            gpart::Hierarchy h;
+            gpart::WeightedGraph fine,coarse;
+            fine.offsets.assign(7,0);fine.vertex_weights.assign(6,1);
+            coarse.offsets.assign(4,0);coarse.vertex_weights.assign(3,2);
+            h.levels={fine,coarse};h.fine_to_coarse={{0,0,1,1,2,2}};
+            gpart::RefineOptions o;o.parts=2;o.max_rounds=0;
+            o.boundary_group_rounds=0;o.strict_verify=true;
+            bool rejected=false;
+            try { auto r=gpart::refine_hierarchy_device(h,std::vector<gpart::GraphTypes::VertexT>{0,0,1},o); }
+            catch(const std::invalid_argument&) { rejected=true; }
+            require(rejected,"strict entry accepted coarse imbalance");
+            o.allow_initial_imbalance=true;
+            auto r=gpart::refine_hierarchy_device(h,std::vector<gpart::GraphTypes::VertexT>{0,0,1},o);
+            require(r.final_part_weights==std::vector<std::uint64_t>{3,3} && r.final_cut==0,
+                    "deferred GPU repair failed to balance finer units");
+            std::vector<gpart::GraphTypes::VertexT> labels{0,0,1};rejected=false;
+            try { gpart::refine_partition(coarse,labels,o); }
+            catch(const std::runtime_error&) { rejected=true; }
+            require(rejected,"standalone repair returned infeasible output");
+        }
+
+        using VertexT = gpart::GraphTypes::VertexT;
+        check_parallel_cut();
+        check_refinement_gain_overflow();
+        check_receiver_counterflow();
+        check_cross_edge_contraction();
+        check_sort_weight_width();
+        check_isolated_packing();
+        check_coarsening_frontier();
+        check_connected_group_exchange();
+        check_joint_refinement();
+        check_heavy_refinement_rows();
+        check_collective_group_target();
+        check_collective_group_target_high_k();
+        check_negative_group_prefix();
+        check_affinity_counter_width();
+        check_weight_compatible_groups();
+        auto hierarchy = make_hierarchy();
         // Both CSR validation paths must retain all rejection conditions.
         for (int failure = 0; failure < 4; ++failure) {
             auto invalid = hierarchy.levels.front();
@@ -761,7 +1241,7 @@ int main() {
                 final_partition,
             "production and strict partitions differ");
         for (bool strict : {false, true}) {
-            gpart::DeviceHierarchy<Types> device_hierarchy;
+            gpart::DeviceHierarchy device_hierarchy;
             for (const auto& level : hierarchy.levels)
                 device_hierarchy.levels.push_back(gpart::make_device_weighted(level));
             for (const auto& mapping : hierarchy.fine_to_coarse)
@@ -780,7 +1260,7 @@ int main() {
 
         // Exact level/map comparison, including the no-contraction case.
         for (int n : {8, 4096}) {
-            gpart::WeightedGraph<Types> input;
+            gpart::WeightedGraph input;
             input.vertex_weights.assign(n, 1);
             input.offsets.push_back(0);
             for (int v = 0; v < n; ++v) {
@@ -829,7 +1309,7 @@ int main() {
 
         // Both parts are full. Two improving moves form a balanced cycle;
         // vacancy-only admission rejects both; exploration can admit the cycle.
-        gpart::WeightedGraph<Types> exchange;
+        gpart::WeightedGraph exchange;
         exchange.offsets = {0, 2, 5, 7, 10, 11, 12};
         exchange.neighbors = {1, 3, 0, 2, 4, 1, 3, 0, 2, 5, 1, 3};
         exchange.edge_weights = {1, 4, 1, 4, 100, 4, 1, 4, 1, 100, 100, 100};
@@ -847,7 +1327,7 @@ int main() {
                 "incremental exchange violated cut/balance");
         // An improving move temporarily overloads part 1. Rebalancing must
         // move an isolated vertex back, preserving the improvement exactly.
-        gpart::WeightedGraph<Types> repair;
+        gpart::WeightedGraph repair;
         repair.vertex_weights.assign(8,1);
         repair.offsets={0,2,4,5,5,7,8,8,8};
         repair.neighbors={1,4,0,2,1,0,5,4};
@@ -862,13 +1342,13 @@ int main() {
         // Strict mode compares every incremental update to an independent CSR
         // rebuild; the CPU oracle also checks the restored best checkpoint.
         for (int k : {2,4,8,32}) {
-            gpart::WeightedGraph<Types> stress;
-            std::vector<std::vector<std::pair<int,typename Types::WeightT>>> rows(384);
-            const auto add=[&](int a,int b,typename Types::WeightT w) {
+            gpart::WeightedGraph stress;
+            std::vector<std::vector<std::pair<int,gpart::GraphTypes::WeightT>>> rows(384);
+            const auto add=[&](int a,int b,gpart::GraphTypes::WeightT w) {
                 rows[a].push_back({b,w});rows[b].push_back({a,w});
             };
-            typename Types::WeightT scale=1;
-            if constexpr (sizeof(typename Types::WeightT)==8) scale=static_cast<typename Types::WeightT>(std::uint64_t{1}<<35);
+            gpart::GraphTypes::WeightT scale=1;
+
             std::vector<VertexT> labels(384);
             std::uint64_t total=0;
             for (int v=0;v<384;++v) {

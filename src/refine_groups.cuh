@@ -15,13 +15,19 @@ struct GroupTransaction {
     std::int64_t gain=0;
 };
 
-// Every lane owns one partition affinity. The collective destination can
+// Every lane owns four or sixteen partition affinities, selected by k. The collective destination can
 // differ from every member's individual favorite. Prefix gain is exact from
 // cached affinities and internal-edge weight; only the new member scans CSR.
+template <int Tiles>
 __device__ int collective_target(int lane,int k,int source,
-    unsigned long long affinity,unsigned long long& best) {
-    unsigned long long value=lane<k && lane!=source ? affinity : 0ULL;
-    int target=lane<k && lane!=source ? lane : INT_MAX;
+    const unsigned long long (&affinity)[Tiles],unsigned long long& best) {
+    unsigned long long value=0;int target=INT_MAX;
+    for(int tile=0;tile<Tiles;++tile) {
+        const int p=lane+32*tile;
+        if(p<k && p!=source && (affinity[tile]>value || (affinity[tile]==value && p<target))) {
+            value=affinity[tile];target=p;
+        }
+    }
     for (int shift=16;shift;shift/=2) {
         const auto other=__shfl_down_sync(0xffffffffU,value,shift);
         const int other_target=__shfl_down_sync(0xffffffffU,target,shift);
@@ -32,10 +38,10 @@ __device__ int collective_target(int lane,int k,int source,
     best=__shfl_sync(0xffffffffU,value,0);
     return __shfl_sync(0xffffffffU,target,0);
 }
-template <typename OffsetT,typename VertexT,typename WeightT,typename CacheT>
+template <typename OffsetT,typename VertexT,typename WeightT,typename CacheT,int Tiles=4>
 __global__ void boundary_group_proposals(
     std::int64_t n,const OffsetT* offsets,const VertexT* neighbors,const WeightT* edges,
-    const WeightT* weights,const VertexT* labels,const CacheT* cache,int k,
+    const WeightT* weights,const VertexT* labels,AffinityView<CacheT> cache,int k,
     BoundaryGroup* groups) {
     const int lane=threadIdx.x&31;
     const auto v=static_cast<std::int64_t>(blockIdx.x)*8+threadIdx.x/32;
@@ -43,10 +49,14 @@ __global__ void boundary_group_proposals(
     BoundaryGroup group;
     if (!lane) for (int i=0;i<kGroupSize;++i) groups[v*kGroupSize+i]=BoundaryGroup{};
     const int source=labels[v];
-    unsigned long long affinity=lane<k ? cache[v*k+lane] : 0ULL,best=0;
+    unsigned long long affinity[Tiles]={},best=0;
+    for(int tile=0;tile<Tiles;++tile) {
+        const int p=lane+32*tile;
+        if(p<k) affinity[tile]=cache.get(v,p);
+    }
     int target=collective_target(lane,k,source,affinity,best);
     if (!best) return;
-    const auto own=__shfl_sync(0xffffffffU,affinity,source);
+    const auto own=__shfl_sync(0xffffffffU,affinity[source/32],source&31);
     group.vertices[0]=static_cast<std::int32_t>(v);group.size=1;group.target=target;
     group.weight=static_cast<std::uint64_t>(weights[v]);
     group.gain=static_cast<std::int64_t>(best)-static_cast<std::int64_t>(own);
@@ -66,8 +76,8 @@ __global__ void boundary_group_proposals(
                 bool present=false;
                 for (int q=0;q<group.size;++q) present|=u==group.vertices[q];
                 if (present) continue;
-                const long long marginal=static_cast<long long>(cache[static_cast<std::int64_t>(u)*k+target])-
-                    static_cast<long long>(cache[static_cast<std::int64_t>(u)*k+source])+2LL*static_cast<long long>(edges[e]);
+                const long long marginal=static_cast<long long>(cache.get(u,target))-
+                    static_cast<long long>(cache.get(u,source))+2LL*static_cast<long long>(detail::edge_weight(edges,e));
                 if (marginal>score || (marginal==score && u<candidate)) { score=marginal;candidate=u; }
             }
         }
@@ -80,13 +90,16 @@ __global__ void boundary_group_proposals(
         if (candidate==INT_MAX) break;
         unsigned long long joined=0;
         for (std::int64_t e=static_cast<std::int64_t>(offsets[candidate])+lane;e<offsets[candidate+1];e+=32)
-            for (int q=0;q<group.size;++q) if (neighbors[e]==group.vertices[q]) joined+=edges[e];
+            for (int q=0;q<group.size;++q) if (neighbors[e]==group.vertices[q]) joined+=detail::edge_weight(edges,e);
         for (int shift=16;shift;shift/=2) joined+=__shfl_down_sync(0xffffffffU,joined,shift);
         joined=__shfl_sync(0xffffffffU,joined,0);
         const auto proposed_internal=internal_weight+joined;
-        if (lane<k) affinity+=cache[static_cast<std::int64_t>(candidate)*k+lane];
+        for(int tile=0;tile<Tiles;++tile) {
+            const int p=lane+32*tile;
+            if(p<k) affinity[tile]+=cache.get(candidate,p);
+        }
         const int proposed_target=collective_target(lane,k,source,affinity,best);
-        const auto outside_own=__shfl_sync(0xffffffffU,affinity,source)-2*proposed_internal;
+        const auto outside_own=__shfl_sync(0xffffffffU,affinity[source/32],source&31)-2*proposed_internal;
         const auto gain=static_cast<std::int64_t>(best)-static_cast<std::int64_t>(outside_own);
         // Prefixes are virtual: a losing extension can expose an improving
         // full group. Retain all connected prefixes up to the fixed size
@@ -107,6 +120,10 @@ __global__ void boundary_group_proposals(
 __device__ int group_pair(const BoundaryGroup& group,const std::int32_t* labels,int k) {
     return group.size ? labels[group.vertices[0]]*k+group.target : k*k;
 }
+struct ValidBoundaryGroup {
+    const BoundaryGroup* groups;
+    __device__ bool operator()(int index) const { return groups[index].size>0; }
+};
 struct GroupOrder {
     const BoundaryGroup* groups;
     const std::int32_t* labels;
@@ -121,6 +138,58 @@ struct GroupOrder {
         return a<b;
     }
 };
+
+// Materialize the complete comparator key once. Sorting indices with a
+// comparator repeatedly gathers two 40-byte groups and their labels. This
+// lossless 210-bit maximum key replaces those random gathers with radix
+// passes over contiguous records; stable sorting supplies the final index
+// tie, since the compacted input is in ascending slot order.
+// Larger batches drop only provably unused field bits using measured maxima.
+using GroupRadixKey = detail::GroupSortRecord;
+struct GroupRadixDecomposer {
+    __host__ __device__ auto operator()(GroupRadixKey& x) const {
+        return cuda::std::tie(x.d,x.c,x.b,x.a);
+    }
+};
+__global__ void encode_group_order(int count,const int* order,
+    const BoundaryGroup* groups,const int* labels,int k,GroupRadixKey* keys,
+    detail::GroupSortLayout layout) {
+    const int i=blockIdx.x*blockDim.x+threadIdx.x;
+    if (i>=count) return;
+    const int index=order[i];
+    const auto g=groups[index];
+    keys[i]=layout.encode(group_pair(g,labels,k),g.weight,g.gain,g.vertices,index);
+}
+__global__ void group_order_limits(int count,const int* order,
+    const BoundaryGroup* groups,unsigned long long* limits) {
+    const int i=blockIdx.x*blockDim.x+threadIdx.x;
+    unsigned long long weight=0,gain=0;
+    if (i<count) {
+        const auto g=groups[order[i]];
+        weight=g.weight;gain=detail::GroupSortLayout::magnitude(g.gain);
+    }
+    for(int delta=16;delta;delta>>=1) {
+        weight=max(weight,__shfl_down_sync(0xffffffffU,weight,delta));
+        gain=max(gain,__shfl_down_sync(0xffffffffU,gain,delta));
+    }
+    __shared__ unsigned long long weights[8],gains[8];
+    if (!(threadIdx.x&31)) { weights[threadIdx.x/32]=weight;gains[threadIdx.x/32]=gain; }
+    __syncthreads();
+    if (!threadIdx.x) {
+        weight=0;gain=0;
+        for(int w=0;w<8;++w) { weight=max(weight,weights[w]);gain=max(gain,gains[w]); }
+        atomicMax(limits,weight);atomicMax(limits+1,gain);
+    }
+}
+__global__ void decode_group_order(int count,const GroupRadixKey* keys,int* order) {
+    const int i=blockIdx.x*blockDim.x+threadIdx.x;
+    if (i<count) order[i]=keys[i].index;
+}
+__global__ void validate_group_order(int count,const int* order,
+    GroupOrder compare,unsigned int* errors) {
+    const int i=blockIdx.x*blockDim.x+threadIdx.x;
+    if (i>0 && i<count && compare(order[i],order[i-1])) atomicAdd(errors,1U);
+}
 struct SameGroup {
     const BoundaryGroup* groups;
     const std::int32_t* labels;
@@ -148,6 +217,10 @@ struct KeepGroupWeights {
     }
 };
 struct GroupRange { int begin=0,end=0; };
+struct NonemptyGroupPair {
+    const GroupRange* ranges;
+    __device__ bool operator()(int pair) const { return ranges[pair].begin<ranges[pair].end; }
+};
 __global__ void group_ranges(int n,const int* order,const BoundaryGroup* groups,
     const std::int32_t* labels,int k,GroupRange* ranges) {
     const int i=blockIdx.x*blockDim.x+threadIdx.x;
@@ -162,15 +235,32 @@ __device__ int group_winner(int a,int b,const int* order,const BoundaryGroup* gr
     const auto ga=groups[order[a]].gain,gb=groups[order[b]].gain;
     return ga>gb || (ga==gb && a<b) ? a : b;
 }
-__global__ void group_tree_leaves(int base,int count,int* tree) {
-    const int i=blockIdx.x*blockDim.x+threadIdx.x;
-    if (i<base) tree[base+i]=i<count ? i : -1;
-}
-__global__ void group_tree_level(int begin,int* tree,const int* order,const BoundaryGroup* groups) {
-    const int i=blockIdx.x*blockDim.x+threadIdx.x;
-    if (i<begin) {
-        const int node=begin+i;
-        tree[node]=group_winner(tree[node*2],tree[node*2+1],order,groups);
+// Build eight tree levels per launch. A tile owns a complete subtree, so
+// block barriers suffice; subsequent launches join the tile roots. Shared
+// gains avoid reloading group records for each pair at every tree level.
+__global__ void group_tree_tile(int start,int base,int count,int* tree,
+    const int* order,const BoundaryGroup* groups) {
+    __shared__ int positions[512];
+    __shared__ std::int64_t gains[512];
+    const int width=min(start,256),t=threadIdx.x;
+    if(t<width) {
+        const int i=blockIdx.x*width+t;
+        const int position=start==base ? (i<count ? i : -1) : tree[start+i];
+        if(start==base) tree[start+i]=position;
+        positions[width+t]=position;
+        gains[width+t]=position<0 ? 0 : groups[order[position]].gain;
+    }
+    for(int stride=width/2;stride;stride/=2) {
+        __syncthreads();
+        if(t<stride) {
+            const int left=2*(stride+t),right=left+1;
+            const int a=positions[left],b=positions[right];
+            const bool choose_a=b<0 || (a>=0 && (gains[left]>gains[right] || (gains[left]==gains[right] && a<b)));
+            const int chosen=choose_a ? left : right;
+            const int position=positions[chosen];
+            positions[stride+t]=position;gains[stride+t]=gains[chosen];
+            tree[start/(width/stride)+blockIdx.x*stride+t]=position;
+        }
     }
 }
 __device__ int group_range_best(int begin,int end,int base,const int* tree,
@@ -219,7 +309,7 @@ __global__ void boundary_group_transactions(
             for (int q=0;q<ga.size;++q) {
                 const auto v=ga.vertices[q];
                 for (std::int64_t e=static_cast<std::int64_t>(offsets[v])+lane;e<offsets[v+1];e+=32)
-                    for (int r=0;r<gb.size;++r) if (neighbors[e]==gb.vertices[r]) cross+=edges[e];
+                    for (int r=0;r<gb.size;++r) if (neighbors[e]==gb.vertices[r]) cross+=detail::edge_weight(edges,e);
             }
             for (int shift=16;shift;shift/=2) cross+=__shfl_down_sync(0xffffffffU,cross,shift);
             cross=__shfl_sync(0xffffffffU,cross,0);
@@ -232,8 +322,8 @@ __global__ void boundary_group_transactions(
     if (!lane) candidates[i]=best;
 }
 __global__ void group_reduce_transactions(int k,const GroupRange* ranges,
-    const GroupTransaction* candidates,GroupTransaction* transactions) {
-    const int pair=blockIdx.x;
+    const GroupTransaction* candidates,GroupTransaction* transactions,const int* active_pairs=nullptr) {
+    const int pair=active_pairs ? active_pairs[blockIdx.x] : blockIdx.x;
     const auto range=ranges[pair];
     GroupTransaction best;
     for (int i=range.begin+threadIdx.x;i<range.end;i+=blockDim.x) {
@@ -251,7 +341,7 @@ __global__ void group_reduce_transactions(int k,const GroupRange* ranges,
         }
         __syncthreads();
     }
-    if (!threadIdx.x) transactions[pair]=shared[0];
+    if (!threadIdx.x) transactions[blockIdx.x]=shared[0];
 }
 struct TransactionOrder {
     __host__ __device__ bool operator()(const GroupTransaction& a,const GroupTransaction& b) const {
@@ -263,13 +353,13 @@ struct TransactionOrder {
 // of repeatedly scanning every part pair. Exact batch gain is still checked.
 template <typename VertexT>
 __global__ void boundary_group_admit(
-    int k,const BoundaryGroup* groups,const GroupTransaction* transactions,
+    int k,int transaction_count,const BoundaryGroup* groups,const GroupTransaction* transactions,
     const VertexT* labels,const unsigned long long* loads,std::uint64_t capacity,
     std::int32_t* flags,std::int32_t* targets) {
     if (threadIdx.x || blockIdx.x) return;
-    unsigned long long planned[32];
+    unsigned long long planned[kMaxParts];
     for (int p=0;p<k;++p) planned[p]=loads[p];
-    for (int i=0;i<k*k;++i) {
+    for (int i=0;i<transaction_count;++i) {
         const auto txn=transactions[i];
         if (txn.gain<=0) break;
         const auto a=groups[txn.a],b=txn.b>=0 ? groups[txn.b] : BoundaryGroup{};
@@ -298,7 +388,7 @@ __global__ void boundary_group_measure(
     long long gain=0;
     for (std::int64_t e=static_cast<std::int64_t>(offsets[v])+lane;e<offsets[v+1];e+=32) {
         const auto u=neighbors[e];
-        if (u!=v && (!flags[u] || u>v)) gain+=static_cast<long long>(weights[e])*((labels[v]!=labels[u])-(targets[v]!=(flags[u] ? targets[u] : labels[u])));
+        if (u!=v && (!flags[u] || u>v)) gain+=static_cast<long long>(detail::edge_weight(weights,e))*((labels[v]!=labels[u])-(targets[v]!=(flags[u] ? targets[u] : labels[u])));
     }
     for (int shift=16;shift;shift/=2) gain+=__shfl_down_sync(0xffffffffU,gain,shift);
     if (!lane) atomicAdd(reinterpret_cast<unsigned long long*>(delta),static_cast<unsigned long long>(gain));

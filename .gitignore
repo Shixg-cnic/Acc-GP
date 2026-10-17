@@ -25,7 +25,8 @@ gpart_*
 /data/
 /dataset/
 /results/
-/graph_untils/out/
+# Reviewed CSV/Markdown result snapshots are explicitly committed;
+# new local experiment output remains ignored.
 *.bin
 *.metis
 *.hierarchy

@@ -2,6 +2,8 @@
 
 #include "check.hpp"
 #include "detail/scratch_pool.hpp"
+#include "detail/scratch_buffer.hpp"
+#include "detail/group_record.hpp"
 #include "graph_types.hpp"
 #include "partition_capacity.hpp"
 
@@ -12,6 +14,7 @@
 #include <cfloat>
 #include <cstdint>
 #include <cstddef>
+#include <cstdlib>
 #include <memory>
 #include <iostream>
 #include <limits>
@@ -22,6 +25,8 @@
 #include <vector>
 
 #include <cuda/atomic>
+#include <cuda/std/tuple>
+#include <cub/device/device_radix_sort.cuh>
 #include <thrust/copy.h>
 #include <thrust/count.h>
 #include <thrust/device_vector.h>
@@ -31,6 +36,7 @@
 #include <thrust/functional.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/reduce.h>
+#include <thrust/remove.h>
 #include <thrust/sequence.h>
 #include <thrust/sort.h>
 #include <thrust/unique.h>
@@ -41,7 +47,6 @@ namespace {
 
 constexpr int kWarpSize = 32;
 constexpr int kWarpsPerBlock = 8;
-constexpr std::uint32_t kInvalidTarget = 0xffffffffU;
 
 __device__ __forceinline__ std::uint32_t refine_mix32(std::uint32_t x) {
     x ^= x >> 16;
@@ -51,11 +56,6 @@ __device__ __forceinline__ std::uint32_t refine_mix32(std::uint32_t x) {
     return x ^ (x >> 16);
 }
 
-// Rebalancing proposals are grouped by overloaded source and loss per unit weight.
-struct RebalanceProposal {
-    std::uint32_t source;
-    double gain_per_weight;
-};
 struct RepairSample {
     long long loss=0;
     unsigned long long weight=0;
@@ -80,7 +80,7 @@ __global__ void refine_cut_kernel(
         for (std::int64_t edge = static_cast<std::int64_t>(offsets[vertex]) + lane;
              edge < static_cast<std::int64_t>(offsets[vertex + 1]); edge += kWarpSize) {
             if (source != partition[neighbors[edge]]) {
-                local += static_cast<unsigned long long>(edge_weights[edge]);
+                local += static_cast<unsigned long long>(detail::edge_weight(edge_weights,edge));
             }
         }
     }
@@ -126,15 +126,14 @@ __global__ void accumulate_part_weights_kernel(
     }
 }
 
-template <typename Types>
 std::uint64_t device_cut_value(
-    const DeviceWeightedGraph<Types>& graph,
-    const thrust::device_vector<typename Types::VertexT>& partition,
-    thrust::device_vector<unsigned long long>& cut_counter) {
+    const DeviceWeightedGraph& graph,
+    const detail::ScratchBuffer<gpart::GraphTypes::VertexT>& partition,
+    detail::ScratchBuffer<unsigned long long>& cut_counter) {
     const auto n = graph.vertices();
     if (n == 0) return 0;
     const int blocks = static_cast<int>((n + kWarpsPerBlock - 1) / kWarpsPerBlock);
-    thrust::fill(cut_counter.begin(), cut_counter.end(), 0ULL);
+    CUDA_CHECK(cudaMemsetAsync(thrust::raw_pointer_cast(cut_counter.data()),0,sizeof(unsigned long long)));
     refine_cut_kernel<<<blocks, 256>>>(
         n,
         thrust::raw_pointer_cast(graph.offsets.data()),
@@ -153,14 +152,13 @@ std::uint64_t device_cut_value(
     return static_cast<std::uint64_t>(directed / 2);
 }
 
-template <typename Types>
 void device_part_weights(
-    const DeviceWeightedGraph<Types>& graph,
-    const thrust::device_vector<typename Types::VertexT>& partition,
-    thrust::device_vector<unsigned long long>& weights,
+    const DeviceWeightedGraph& graph,
+    const detail::ScratchBuffer<gpart::GraphTypes::VertexT>& partition,
+    detail::ScratchBuffer<unsigned long long>& weights,
     int parts) {
     weights.resize(static_cast<std::size_t>(parts));
-    thrust::fill(weights.begin(), weights.end(), 0ULL);
+    CUDA_CHECK(cudaMemsetAsync(thrust::raw_pointer_cast(weights.data()),0,parts*sizeof(unsigned long long)));
     const auto n = graph.vertices();
     const int blocks = static_cast<int>((n + 255) / 256);
     accumulate_part_weights_kernel<<<blocks, 256>>>(
@@ -176,10 +174,9 @@ std::uint64_t refinement_capacity(
     return partition_capacity(total_weight, parts, imbalance_ratio);
 }
 
-template <typename Types>
 std::vector<std::uint64_t> validate_and_measure_partition(
-    const WeightedGraph<Types>& graph,
-    const std::vector<typename Types::VertexT>& partition,
+    const WeightedGraph& graph,
+    const std::vector<gpart::GraphTypes::VertexT>& partition,
     int parts,
     std::uint64_t& total_weight) {
     if (partition.size() != static_cast<std::size_t>(graph.vertices())) {
@@ -205,45 +202,85 @@ std::vector<std::uint64_t> validate_and_measure_partition(
 
 }  // namespace
 
-#include "refine_groups.cuh"
+#include "refine_affinity.cuh"
 
-template <typename Types>
+#include "refine_groups.cuh"
+#include "refine_joint.cuh"
+
+// Each cache build writes all n*k affinity entries and n row totals before
+// any read. A raw pool allocation avoids device_vector's redundant zero fill.
+// Resizing discards the previous level; this is not a preserving vector.
+template <typename T>
+class RefinementCache {
+    detail::ScratchAllocator<T> allocator_;
+    typename detail::ScratchAllocator<T>::pointer pointer_{};
+    std::size_t size_=0;
+public:
+    RefinementCache()=default;
+    RefinementCache(const RefinementCache&)=delete;
+    RefinementCache& operator=(const RefinementCache&)=delete;
+    ~RefinementCache() { if (size_) allocator_.deallocate(pointer_,size_); }
+    std::size_t size() const { return size_; }
+    auto data() { return pointer_; }
+    auto begin() { return pointer_; }
+    void resize(std::size_t required) {
+        if (required<=size_) return;
+        if (size_) { allocator_.deallocate(pointer_,size_);pointer_=typename detail::ScratchAllocator<T>::pointer{};size_=0; }
+        pointer_=allocator_.allocate(required);size_=required;
+    }
+};
+
 class RefineWorkspace {
 public:
-    using VertexT = typename Types::VertexT;
-    detail::ScratchVector<VertexT> previous_partition;
-    detail::ScratchVector<unsigned long long> previous_part_weights;
-    thrust::device_vector<unsigned long long> cut_counter;
-    detail::ScratchVector<RebalanceProposal> rebalance_proposals;
-    detail::ScratchVector<std::uint64_t> dense_affinity;
-    detail::ScratchVector<std::uint32_t> dense_affinity32;
-    detail::ScratchVector<std::int32_t> incremental_targets;
-    detail::ScratchVector<std::int64_t> incremental_gains;
-    detail::ScratchVector<std::int32_t> incremental_locks;
-    detail::ScratchVector<std::int32_t> incremental_flags;
-    detail::ScratchVector<VertexT> incremental_movers;
-    detail::ScratchVector<std::int64_t> incremental_delta;
+    using VertexT = gpart::GraphTypes::VertexT;
+    detail::ScratchBuffer<VertexT> previous_partition;
+    detail::ScratchBuffer<unsigned long long> previous_part_weights;
+    detail::ScratchBuffer<unsigned long long> cut_counter;
+    RefinementCache<std::uint64_t> dense_affinity;
+    RefinementCache<std::uint32_t> dense_affinity32;
+    RefinementCache<std::uint8_t> affinity_keys;
+    RefinementCache<std::uint8_t> affinity_counts;
+    detail::ScratchBuffer<std::int32_t> frontier_rows;
+    detail::ScratchBuffer<std::int32_t> frontier_members;
+    detail::ScratchBuffer<unsigned long long> frontier_count;
+    detail::ScratchBuffer<std::int32_t> affinity_dirty;
+    detail::ScratchBuffer<std::int32_t> affinity_dirty_rows;
+    detail::ScratchBuffer<unsigned long long> affinity_dirty_count;
+    detail::ScratchBuffer<std::int32_t> incremental_targets;
+    detail::ScratchBuffer<std::int64_t> incremental_gains;
+    detail::ScratchBuffer<std::int32_t> incremental_locks;
+    detail::ScratchBuffer<std::int32_t> incremental_flags;
+    detail::ScratchBuffer<VertexT> incremental_movers;
+    detail::ScratchBuffer<std::int64_t> incremental_delta;
     // Bound the heavy-row queue by CSR entries / threshold, not by vertices.
-    detail::ScratchVector<VertexT> incremental_heavy_rows;
-    detail::ScratchVector<unsigned int> incremental_heavy_count;
-    detail::ScratchVector<std::int64_t> incremental_heavy_corrections;
-    detail::ScratchVector<std::int32_t> balance_bucket_ids;
-    detail::ScratchVector<std::uint64_t> balance_bucket_ranks;
-    detail::ScratchVector<unsigned long long> balance_bucket_counts;
-    detail::ScratchVector<unsigned long long> balance_bucket_offsets;
-    detail::ScratchVector<BoundaryGroup> boundary_groups;
-    detail::ScratchVector<GroupTransaction> group_transactions;
-    detail::ScratchVector<std::int32_t> group_order;
-    detail::ScratchVector<std::int32_t> group_weight_order;
-    detail::ScratchVector<std::int32_t> group_tree;
-    detail::ScratchVector<GroupRange> group_ranges;
-    detail::ScratchVector<GroupTransaction> group_candidates;
-    detail::ScratchVector<double> repair_prices;
-    detail::ScratchVector<RepairSample> repair_samples;
+    detail::ScratchBuffer<VertexT> incremental_heavy_rows;
+    detail::ScratchBuffer<unsigned int> incremental_heavy_count;
+    detail::ScratchBuffer<std::int64_t> incremental_heavy_corrections;
+    detail::ScratchBuffer<std::int32_t> balance_bucket_ids;
+    detail::ScratchBuffer<std::uint64_t> balance_bucket_ranks;
+    detail::ScratchBuffer<unsigned long long> balance_bucket_counts;
+    detail::ScratchBuffer<unsigned long long> balance_bucket_offsets;
+    detail::ScratchBuffer<JointMove> joint_moves;
+    detail::ScratchBuffer<unsigned long long> joint_quotient, joint_seeds, joint_events;
+    detail::ScratchBuffer<int> joint_partner, joint_visits, joint_stops;
+    detail::ScratchBuffer<BoundaryGroup> boundary_groups;
+    detail::ScratchBuffer<GroupTransaction> group_transactions;
+    detail::ScratchBuffer<std::int32_t> group_order;
+    detail::ScratchBuffer<GroupRadixKey> group_sort_keys,group_sort_other;
+    detail::ScratchBuffer<std::uint8_t> group_sort_temp;
+    detail::ScratchBuffer<unsigned int> group_sort_errors;
+    detail::ScratchBuffer<unsigned long long> group_sort_limits;
+    detail::ScratchBuffer<std::int32_t> group_weight_order;
+    detail::ScratchBuffer<std::int32_t> group_tree;
+    detail::ScratchBuffer<GroupRange> group_ranges;
+    detail::ScratchBuffer<int> group_active_pairs;
+    detail::ScratchBuffer<GroupTransaction> group_candidates;
+    detail::ScratchBuffer<double> repair_prices;
+    detail::ScratchBuffer<RepairSample> repair_samples;
     double resize_seconds = 0.0;
 
-    template <typename T, typename Allocator>
-    void grow(thrust::device_vector<T, Allocator>& buffer, std::size_t required) {
+    template <typename Buffer>
+    void grow(Buffer& buffer, std::size_t required) {
         if (buffer.size() < required) {
             const auto start = std::chrono::steady_clock::now();
             buffer.resize(required);
@@ -256,37 +293,38 @@ public:
         grow(previous_partition, vertices);
         grow(previous_part_weights, parts);
         grow(cut_counter, 1);
-        grow(rebalance_proposals, vertices);
     }
 };
 
-template <typename Types>
 class RefineDeviceContext {
 public:
-    using VertexT = typename Types::VertexT;
-    DeviceWeightedGraph<Types> graph;
-    thrust::device_vector<VertexT> partition;
-    thrust::device_vector<unsigned long long> part_weights;
-    RefineWorkspace<Types>& workspace;
+    using VertexT = gpart::GraphTypes::VertexT;
+    DeviceWeightedGraph graph;
+    detail::ScratchBuffer<VertexT> partition;
+    detail::ScratchBuffer<unsigned long long> part_weights;
+    RefineWorkspace& workspace;
     std::vector<std::uint64_t> host_part_weights;
     std::uint64_t capacity;
+    std::uint64_t known_cut=0;
+    bool has_known_cut=false;
     std::int64_t n;
     int vertex_blocks;
     int warp_blocks;
 
     RefineDeviceContext(
-        const WeightedGraph<Types>& input,
+        const WeightedGraph& input,
         const std::vector<VertexT>& labels,
         const RefineOptions& options,
-        RefineWorkspace<Types>& temporary)
+        RefineWorkspace& temporary)
         : workspace(temporary),
           n(input.vertices()),
           vertex_blocks(static_cast<int>((n + 255) / 256)),
           warp_blocks(static_cast<int>(
               (n + kWarpsPerBlock - 1) / kWarpsPerBlock)) {
-        if (options.parts < 2 || options.parts > 32 ||
+        if (options.parts < 2 || options.parts > kMaxParts ||
             options.max_rounds < 0 || options.max_rounds > 64 ||
             options.stale_rounds < 1 || options.stale_rounds > 64 ||
+            options.joint_rounds < 0 || options.joint_rounds > 32 ||
             options.boundary_group_rounds < 0 || options.boundary_group_rounds > 8 ||
             !std::isfinite(options.refinement_growth_ratio) || options.refinement_growth_ratio < 1.0 ||
             !std::isfinite(options.imbalance_ratio) ||
@@ -304,26 +342,26 @@ public:
             input, labels, options.parts, total_weight);
         capacity = refinement_capacity(
             total_weight, options.parts, options.imbalance_ratio);
-        if (*std::max_element(
+        if (!options.allow_initial_imbalance && *std::max_element(
                 host_part_weights.begin(), host_part_weights.end()) >
             capacity) {
             throw std::invalid_argument(
                 "initial refinement partition is imbalanced");
         }
         graph = make_device_weighted(input);
-        partition = labels;
+        partition.assign(labels.begin(), labels.end());
         part_weights.assign(
             host_part_weights.begin(), host_part_weights.end());
         initialize_buffers();
     }
 
     RefineDeviceContext(
-        DeviceWeightedGraph<Types>&& device_graph,
-        thrust::device_vector<VertexT>&& device_partition,
-        thrust::device_vector<unsigned long long>&& device_part_weights,
+        DeviceWeightedGraph&& device_graph,
+        detail::ScratchBuffer<VertexT>&& device_partition,
+        detail::ScratchBuffer<unsigned long long>&& device_part_weights,
         std::vector<std::uint64_t> measured_part_weights,
         const RefineOptions& options,
-        RefineWorkspace<Types>& temporary)
+        RefineWorkspace& temporary)
         : graph(std::move(device_graph)),
           partition(std::move(device_partition)),
           part_weights(std::move(device_part_weights)),
@@ -345,9 +383,9 @@ public:
             total_weight, options.parts, options.imbalance_ratio);
         if (partition.size() != static_cast<std::size_t>(n) ||
             part_weights.size() != static_cast<std::size_t>(options.parts) ||
-            *std::max_element(
+            (!options.allow_initial_imbalance && *std::max_element(
                 host_part_weights.begin(), host_part_weights.end()) >
-                capacity) {
+                capacity)) {
             throw std::invalid_argument("invalid resident refinement state");
         }
         initialize_buffers();
@@ -362,9 +400,14 @@ public:
     }
 
     void sync_part_weights() {
-        thrust::copy(
-            part_weights.begin(), part_weights.end(),
-            host_part_weights.begin());
+        // uint64_t is unsigned long on this host, whereas the CUDA atomic
+        // counter is unsigned long long. Thrust treats that as conversion,
+        // allocating a device temporary and launching a kernel on every poll.
+        // Both are exact unsigned 64-bit representations; transfer the bits.
+        static_assert(sizeof(std::uint64_t)==sizeof(unsigned long long) &&
+                      std::numeric_limits<unsigned long long>::digits==64);
+        CUDA_CHECK(cudaMemcpy(host_part_weights.data(),thrust::raw_pointer_cast(part_weights.data()),
+            host_part_weights.size()*sizeof(std::uint64_t),cudaMemcpyDeviceToHost));
     }
 
     void export_partition(std::vector<VertexT>& labels) {
@@ -372,12 +415,11 @@ public:
     }
 };
 
-template <typename Types>
-void validate_refinement_gain_range(const WeightedGraph<Types>& graph) {
+void validate_refinement_gain_range(const WeightedGraph& graph) {
     constexpr auto signed_limit = static_cast<std::uint64_t>(
         std::numeric_limits<std::int64_t>::max()) / 2;
     constexpr auto max_weight = static_cast<std::uint64_t>(
-        std::numeric_limits<typename Types::WeightT>::max());
+        std::numeric_limits<gpart::GraphTypes::WeightT>::max());
     // A type/size bound proves exactly the old safety condition without
     // touching edge data. Division avoids overflow in the bound itself.
     if (graph.edge_weights.size() <= signed_limit / max_weight) return;
@@ -400,12 +442,16 @@ struct RefinementWeightSum {
     }
 };
 
-template <typename Types>
-void validate_refinement_gain_range(const DeviceWeightedGraph<Types>& graph) {
+void validate_refinement_gain_range(const DeviceWeightedGraph& graph) {
     constexpr auto limit = std::uint64_t(INT64_MAX) / 2;
-    constexpr auto max_weight = std::numeric_limits<typename Types::WeightT>::max();
+    constexpr auto max_weight = std::numeric_limits<gpart::GraphTypes::WeightT>::max();
+    if (graph.implicit_unit_weights) {
+        if (static_cast<std::uint64_t>(graph.edges())>limit)
+            throw std::overflow_error("refinement signed gain range exceeded");
+        return;
+    }
     if (graph.edge_weights.size() <= limit / max_weight) return;
-    if (thrust::reduce(graph.edge_weights.begin(), graph.edge_weights.end(),
+    if (thrust::reduce(detail::scratch_policy(), graph.edge_weights.begin(), graph.edge_weights.end(),
                        std::uint64_t{0}, RefinementWeightSum{}) > limit) {
         throw std::overflow_error("refinement signed gain range exceeded");
     }
@@ -419,7 +465,7 @@ struct InvalidId {
 
 struct CheckedWeight {
     std::uint64_t value;
-    bool overflow;
+    std::uint64_t overflow;
     __host__ __device__ CheckedWeight(std::uint64_t v = 0) : value(v), overflow(false) {}
 };
 struct CheckedWeightAdd {
@@ -436,27 +482,28 @@ struct ToCheckedWeight {
 
 #include "refine_incremental.cuh"
 
-template <typename Types>
 void refine_partition(
-    const WeightedGraph<Types>& graph,
-    std::vector<typename Types::VertexT>& partition,
+    const WeightedGraph& graph,
+    std::vector<gpart::GraphTypes::VertexT>& partition,
     const RefineOptions& options,
     RefineStats* output_stats) {
-    RefineWorkspace<Types> workspace;
-    RefineDeviceContext<Types> context(graph, partition, options, workspace);
+    RefineWorkspace workspace;
+    RefineDeviceContext context(graph, partition, options, workspace);
     auto stats = run_incremental_refinement(context, options, options.max_rounds);
+    if (stats.initial_repair_failed) throw std::runtime_error("initial refinement capacity repair failed");
     context.export_partition(partition);
     if (output_stats != nullptr) *output_stats = stats;
 }
 
-template <typename Types, bool Resident, typename H, typename P>
-DeviceUncoarsenResult<Types> refine_hierarchy_impl(
+template <bool Resident, typename H, typename P>
+DeviceUncoarsenResult refine_hierarchy_impl(
     H& hierarchy, P&& coarsest_partition,
     const RefineOptions& options) {
-    using VertexT = typename Types::VertexT;
-    if (options.parts < 2 || options.parts > 32 || options.max_rounds < 0 ||
+    using VertexT = gpart::GraphTypes::VertexT;
+    if (options.parts < 2 || options.parts > kMaxParts || options.max_rounds < 0 ||
         options.max_rounds > 64 || options.stale_rounds < 1 || options.stale_rounds > 64 ||
-        options.boundary_group_rounds < 0 || options.boundary_group_rounds > 8 ||
+        options.joint_rounds < 0 || options.joint_rounds > 32 ||
+            options.boundary_group_rounds < 0 || options.boundary_group_rounds > 8 ||
         !std::isfinite(options.refinement_growth_ratio) || options.refinement_growth_ratio < 1.0 ||
         !std::isfinite(options.imbalance_ratio) ||
         options.imbalance_ratio < 1.0) {
@@ -472,37 +519,42 @@ DeviceUncoarsenResult<Types> refine_hierarchy_impl(
     for (std::size_t level = 0; level < hierarchy.levels.size(); ++level) {
         validate_refinement_gain_range(hierarchy.levels[level]);
     }
-    RefineWorkspace<Types> workspace;
+    RefineWorkspace workspace;
     auto& coarsest = hierarchy.levels.back();
+    const bool projection_timings = options.strict_verify || std::getenv("GPART_GPU_TIMINGS") != nullptr;
+    std::cout << "refine_projection_timings_enabled=" << projection_timings << '\n';
     std::uint64_t total_weight = 0;
     const auto initial_h2d_start = std::chrono::steady_clock::now();
-    DeviceWeightedGraph<Types> current_graph;
-    thrust::device_vector<VertexT> current_partition;
-    thrust::device_vector<unsigned long long> current_part_weights;
+    DeviceWeightedGraph current_graph;
+    detail::ScratchBuffer<VertexT> current_partition;
+    detail::ScratchBuffer<unsigned long long> current_part_weights;
     std::vector<std::uint64_t> current_host_weights;
     if constexpr (Resident) {
         if (coarsest_partition.size() != static_cast<std::size_t>(coarsest.vertices()) ||
-            thrust::count_if(coarsest_partition.begin(), coarsest_partition.end(),
+            thrust::count_if(detail::scratch_policy(), coarsest_partition.begin(), coarsest_partition.end(),
                              InvalidId{options.parts}) != 0) {
             throw std::invalid_argument("invalid coarsest device partition");
         }
-        const auto sum = thrust::transform_reduce(coarsest.vertex_weights.begin(),
+        const auto sum = thrust::transform_reduce(detail::scratch_policy(), coarsest.vertex_weights.begin(),
             coarsest.vertex_weights.end(), ToCheckedWeight{}, CheckedWeight{}, CheckedWeightAdd{});
         if (sum.overflow) throw std::overflow_error("refinement vertex weight sum overflow");
         total_weight = sum.value;
         current_graph = std::move(coarsest);
-        current_partition = std::move(coarsest_partition);
+        current_partition.assign(coarsest_partition.begin(), coarsest_partition.end());
+        // Keep the public interface unchanged; release the consumed ordinary
+        // vector inside native timing after its small coarsest copy completes.
+        thrust::device_vector<VertexT>{}.swap(coarsest_partition);
         device_part_weights(current_graph, current_partition, current_part_weights, options.parts);
         current_host_weights.resize(options.parts);
-        thrust::copy(current_part_weights.begin(), current_part_weights.end(), current_host_weights.begin());
+        CUDA_CHECK(cudaMemcpy(current_host_weights.data(),thrust::raw_pointer_cast(current_part_weights.data()),options.parts*sizeof(std::uint64_t),cudaMemcpyDeviceToHost));
     } else {
         current_host_weights = validate_and_measure_partition(
             coarsest, coarsest_partition, options.parts, total_weight);
         current_graph = make_device_weighted(coarsest);
-        current_partition = coarsest_partition;
+        current_partition.assign(coarsest_partition.begin(), coarsest_partition.end());
         current_part_weights.assign(current_host_weights.begin(), current_host_weights.end());
     }
-    if (*std::max_element(current_host_weights.begin(), current_host_weights.end()) >
+    if (!options.allow_initial_imbalance && *std::max_element(current_host_weights.begin(), current_host_weights.end()) >
         refinement_capacity(total_weight, options.parts, options.imbalance_ratio)) {
         throw std::invalid_argument("initial refinement partition is imbalanced");
     }
@@ -511,12 +563,12 @@ DeviceUncoarsenResult<Types> refine_hierarchy_impl(
     workspace.grow(workspace.cut_counter, 1);
     auto& cut_counter = workspace.cut_counter;
 
-    DeviceUncoarsenResult<Types> result;
+    DeviceUncoarsenResult result;
     result.levels.reserve(hierarchy.levels.size() - 1);
     std::uint64_t last_cut=0;
     auto last_refined_vertices=current_graph.vertices();
     {
-        RefineDeviceContext<Types> context(std::move(current_graph),
+        RefineDeviceContext context(std::move(current_graph),
             std::move(current_partition), std::move(current_part_weights),
             current_host_weights, options, workspace);
         const auto stats = run_incremental_refinement(context, options, options.max_rounds);
@@ -527,6 +579,10 @@ DeviceUncoarsenResult<Types> refine_hierarchy_impl(
                   << " rounds=" << stats.rounds
                   << " lp_cut_gain=" << stats.lp_cut_gain
                   << " affinity_counter_bits=" << stats.affinity_counter_bits
+                  << " sparse_affinity=" << stats.sparse_affinity
+                  << " on_demand_affinity=" << stats.on_demand_affinity
+                  << " frontier_vertices_initial=" << stats.frontier_vertices_initial
+                  << " affinity_bytes=" << stats.affinity_bytes
                   << " lp_cut_loss=" << stats.lp_cut_loss
                   << " rebalance_cut_gain=" << stats.rebalance_cut_gain
                   << " rebalance_cut_loss=" << stats.rebalance_cut_loss
@@ -548,7 +604,7 @@ DeviceUncoarsenResult<Types> refine_hierarchy_impl(
             throw std::invalid_argument("fine-to-coarse map has wrong length");
         }
         if constexpr (Resident) {
-            if (thrust::count_if(map.begin(), map.end(), InvalidId{current_graph.vertices()}) != 0) {
+            if (thrust::count_if(detail::scratch_policy(), map.begin(), map.end(), InvalidId{current_graph.vertices()}) != 0) {
                 throw std::invalid_argument("fine-to-coarse map contains an invalid id");
             }
         } else {
@@ -566,8 +622,8 @@ DeviceUncoarsenResult<Types> refine_hierarchy_impl(
         report.vertices = fine.vertices();
         report.edge_entries = fine.edges();
         const auto graph_h2d_start = std::chrono::steady_clock::now();
-        DeviceWeightedGraph<Types> fine_graph;
-        thrust::device_vector<VertexT> device_map;
+        DeviceWeightedGraph fine_graph;
+        detail::ScratchVector<VertexT> device_map;
         if constexpr (Resident) {
             fine_graph = std::move(fine);
             device_map = std::move(map);
@@ -575,7 +631,7 @@ DeviceUncoarsenResult<Types> refine_hierarchy_impl(
             fine_graph = make_device_weighted(fine);
             device_map = map;
         }
-        thrust::device_vector<VertexT> fine_partition(
+        detail::ScratchBuffer<VertexT> fine_partition(
             static_cast<std::size_t>(report.vertices));
         report.timings.graph_h2d_seconds = Resident ? 0.0 : pending_graph_h2d +
             std::chrono::duration<double>(
@@ -590,28 +646,26 @@ DeviceUncoarsenResult<Types> refine_hierarchy_impl(
             thrust::raw_pointer_cast(current_partition.data()),
             thrust::raw_pointer_cast(fine_partition.data()));
         CUDA_CHECK(cudaGetLastError());
-        CUDA_CHECK(cudaDeviceSynchronize());
-        report.timings.projection_gpu_seconds = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - projection_start).count();
+        // Producers and consumers share the default stream; nested LP graphs
+        // already wait on its ready event. Sync only for requested telemetry.
+        if (projection_timings) CUDA_CHECK(cudaDeviceSynchronize());
+        report.timings.projection_gpu_seconds = projection_timings ? std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - projection_start).count() : 0.0;
 
-        thrust::device_vector<unsigned long long> fine_part_weights;
+        detail::ScratchBuffer<unsigned long long> fine_part_weights;
         auto projected_weights = current_host_weights;
         if (options.strict_verify) {
             const auto verification_start = std::chrono::steady_clock::now();
             device_part_weights(
                 fine_graph, fine_partition, fine_part_weights, options.parts);
-            thrust::copy(
-                fine_part_weights.begin(), fine_part_weights.end(),
-                projected_weights.begin());
+            CUDA_CHECK(cudaMemcpy(projected_weights.data(),thrust::raw_pointer_cast(fine_part_weights.data()),options.parts*sizeof(std::uint64_t),cudaMemcpyDeviceToHost));
             report.projection_cut = device_cut_value(
                 fine_graph, fine_partition, cut_counter);
             const auto coarse_cut = device_cut_value(
                 current_graph, current_partition, cut_counter);
             std::vector<std::uint64_t> coarse_weights(
                 static_cast<std::size_t>(options.parts));
-            thrust::copy(
-                current_part_weights.begin(), current_part_weights.end(),
-                coarse_weights.begin());
+            CUDA_CHECK(cudaMemcpy(coarse_weights.data(),thrust::raw_pointer_cast(current_part_weights.data()),options.parts*sizeof(std::uint64_t),cudaMemcpyDeviceToHost));
             if (coarse_cut != report.projection_cut ||
                 coarse_weights != projected_weights) {
                 throw std::runtime_error(
@@ -632,15 +686,17 @@ DeviceUncoarsenResult<Types> refine_hierarchy_impl(
             static_cast<double>(report.projection_max_part_weight) *
             options.parts / static_cast<double>(projected_total);
 
-        RefineDeviceContext<Types> context(
+        RefineDeviceContext context(
             std::move(fine_graph), std::move(fine_partition),
             std::move(fine_part_weights), projected_weights, options, workspace);
+        context.known_cut=last_cut;context.has_known_cut=true;
         auto resize_before_stage = workspace.resize_seconds;
         const bool refine_this_level = fine_level==0 ||
+            report.projection_max_part_weight>context.capacity ||
             report.vertices>=options.refinement_growth_ratio*last_refined_vertices;
         if (refine_this_level) {
             report.refinement = run_incremental_refinement(context, options, options.max_rounds);
-            last_refined_vertices=report.vertices;
+            if (!report.refinement.initial_repair_failed) last_refined_vertices=report.vertices;
         } else {
             // Projection preserves cut and part weights. Avoid rebuilding
             // the affinity cache when this level adds little resolution.
@@ -661,17 +717,24 @@ DeviceUncoarsenResult<Types> refine_hierarchy_impl(
         result.levels.push_back(std::move(report));
     }
 
+    if (*std::max_element(current_host_weights.begin(), current_host_weights.end()) >
+        refinement_capacity(total_weight, options.parts, options.imbalance_ratio))
+        throw std::runtime_error("final original partition violates capacity");
     result.final_cut = last_cut;
     result.final_part_weights = current_host_weights;
-    const auto directed_edge_weight = thrust::reduce(
-        current_graph.edge_weights.begin(), current_graph.edge_weights.end(),
+    const auto directed_edge_weight = current_graph.implicit_unit_weights
+        ? static_cast<std::uint64_t>(current_graph.edges()) : thrust::reduce(
+        detail::scratch_policy(), current_graph.edge_weights.begin(), current_graph.edge_weights.end(),
         std::uint64_t{0});
     if ((directed_edge_weight & 1ULL) != 0) {
         throw std::runtime_error("symmetric graph has odd directed edge weight");
     }
     result.total_edge_weight = directed_edge_weight / 2;
     if constexpr (Resident) {
-        result.device_partition = std::move(current_partition);
+        // Final output ownership remains the public ordinary device_vector.
+        // Its allocation and this D2D copy are both inside native timing;
+        // working labels and their pool pages are released before pool trim.
+        result.device_partition.assign(current_partition.begin(), current_partition.end());
     } else {
         result.partition.resize(static_cast<std::size_t>(current_graph.vertices()));
         const auto final_d2h_start = std::chrono::steady_clock::now();
@@ -682,33 +745,21 @@ DeviceUncoarsenResult<Types> refine_hierarchy_impl(
     return result;
 }
 
-template <typename Types>
-DeviceUncoarsenResult<Types> refine_hierarchy_device(
-    const Hierarchy<Types>& hierarchy,
-    const std::vector<typename Types::VertexT>& partition, const RefineOptions& options) {
-    return refine_hierarchy_impl<Types, false>(hierarchy, partition, options);
+DeviceUncoarsenResult refine_hierarchy_device(
+    const Hierarchy& hierarchy,
+    const std::vector<gpart::GraphTypes::VertexT>& partition, const RefineOptions& options) {
+    return refine_hierarchy_impl<false>(hierarchy, partition, options);
 }
 
-template <typename Types>
-DeviceUncoarsenResult<Types> refine_hierarchy_device(
-    DeviceHierarchy<Types>& hierarchy,
-    thrust::device_vector<typename Types::VertexT>&& partition, const RefineOptions& options) {
-    return refine_hierarchy_impl<Types, true>(hierarchy, std::move(partition), options);
+DeviceUncoarsenResult refine_hierarchy_device(
+    DeviceHierarchy& hierarchy,
+    thrust::device_vector<gpart::GraphTypes::VertexT>&& partition, const RefineOptions& options) {
+    return refine_hierarchy_impl<true>(hierarchy, std::move(partition), options);
 }
 
-template void refine_partition<ActiveTypes>(
-    const WeightedGraph<ActiveTypes>&,
-    std::vector<ActiveTypes::VertexT>&,
-    const RefineOptions&,
-    RefineStats*);
 
-template DeviceUncoarsenResult<ActiveTypes>
-refine_hierarchy_device<ActiveTypes>(
-    const Hierarchy<ActiveTypes>&,
-    const std::vector<ActiveTypes::VertexT>&,
-    const RefineOptions&);
-template DeviceUncoarsenResult<ActiveTypes> refine_hierarchy_device<ActiveTypes>(
-    DeviceHierarchy<ActiveTypes>&, thrust::device_vector<ActiveTypes::VertexT>&&,
-    const RefineOptions&);
+
+
+
 
 }  // namespace gpart

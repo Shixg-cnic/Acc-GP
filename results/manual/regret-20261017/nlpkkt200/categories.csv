@@ -1,0 +1,2 @@
+﻿category,planned_configs,complete_configs,speedup_over_jet_geomean,mean_cut_ratio_over_jet,speedup_over_legacy_geomean,mean_cut_ratio_over_legacy,speedup_over_reference_geomean,mean_cut_ratio_over_reference,mean_ours_cut_fraction,mean_jet_cut_fraction,below_1_15,below_1_2
+Optimization,6,6,1.044335359731756,1.0325471331758858,,,0.995653222803934,0.9883915283552203,0.020602021627731667,0.020036974285292896,6,6

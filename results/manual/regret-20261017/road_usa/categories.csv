@@ -1,0 +1,2 @@
+﻿category,planned_configs,complete_configs,speedup_over_jet_geomean,mean_cut_ratio_over_jet,speedup_over_legacy_geomean,mean_cut_ratio_over_legacy,speedup_over_reference_geomean,mean_cut_ratio_over_reference,mean_ours_cut_fraction,mean_jet_cut_fraction,below_1_15,below_1_2
+Road Network,6,6,1.6722381062087686,1.1649082197757246,,,0.9817084045969832,1.006915756753095,0.0001303733505527123,0.00011741745913054519,0,0

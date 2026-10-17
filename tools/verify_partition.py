@@ -21,7 +21,7 @@ def read_i64(path: Path) -> array:
 
 def verify(indptr: Path, indices_path: Path, partition: Path, parts: int,
            imbalance: str = "1.03", partition_format: str = "binary") -> dict:
-    if not 2 <= parts <= 32 or not Decimal(imbalance).is_finite() or Decimal(imbalance) < 1:
+    if not 2 <= parts <= 128 or not Decimal(imbalance).is_finite() or Decimal(imbalance) < 1:
         raise ValueError("invalid parts or imbalance ratio")
     offsets, indices = read_i64(indptr), read_i64(indices_path)
     if not offsets or offsets[0] != 0 or offsets[-1] != len(indices):

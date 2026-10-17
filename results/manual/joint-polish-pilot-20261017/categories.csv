@@ -1,0 +1,5 @@
+﻿category,planned_configs,complete_configs,speedup_over_jet_geomean,mean_cut_ratio_over_jet,speedup_over_legacy_geomean,mean_cut_ratio_over_legacy,speedup_over_reference_geomean,mean_cut_ratio_over_reference,mean_ours_cut_fraction,mean_jet_cut_fraction,below_1_15,below_1_2
+Artificial Mesh,2,2,,,,,1.0259355802037697,0.9989413358068377,0.002890458922095786,,0,0
+Social Network,2,2,,,,,1.0140342102020954,1.0212593887398516,0.10838583081081553,,0,0
+Finite Element,2,2,,,,,1.0746829709272787,1.01338553178861,0.014417681404949471,,0,0
+Semiconductor,2,2,,,,,1.0331785930949668,1.0012525860354076,0.026998709398769513,,0,0

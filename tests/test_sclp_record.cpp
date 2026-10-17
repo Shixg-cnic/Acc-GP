@@ -51,6 +51,25 @@ int main() {
         require(!SclpRecordLayout::checked(0, 0, 1).packed(), "empty ID range");
         require(!SclpRecordLayout::checked(2147483648LL, 1, 1).packed(), "ID width overflow");
 
+        // Unpacked weights still admit narrow vertex IDs. Include the full
+        // invalid sentinel after sorting on just the significant key bits.
+        for (std::int64_t n : {1LL,2LL,3LL,1024LL,4099LL,18459128LL,2147483647LL}) {
+            auto narrow=SclpRecordLayout::checked(n,invalid,1);
+            require(!narrow.packed(),"unknown weight bound packed");
+            std::vector<U64> actual,legacy;
+            for(std::int64_t u:std::vector<std::int64_t>{0,n/2,n-1}) for(std::int64_t v:std::vector<std::int64_t>{0,n/2,n-1}) {
+                auto key=narrow.encode(u,v,invalid);
+                require(narrow.source(key)==u && narrow.target(key)==v,"unpacked vertex roundtrip");
+                actual.push_back(key);legacy.push_back((U64{static_cast<U64>(u)}<<32)|v);
+            }
+            actual.push_back(invalid);legacy.push_back(invalid);
+            const auto mask=(U64{1}<<(2*narrow.vertex_bits))-1;
+            std::stable_sort(actual.begin(),actual.end(),[mask](U64 a,U64 b){return (a&mask)<(b&mask);});
+            std::stable_sort(legacy.begin(),legacy.end());
+            for(std::size_t i=0;i+1<actual.size();++i)
+                require(((U64{narrow.source(actual[i])}<<32)|narrow.target(actual[i]))==legacy[i],"unpacked order changed");
+            require(actual.back()==invalid,"unpacked invalid sentinel moved into valid entries");
+        }
         // Compare stable (source,target) ordering and exact reduction to the
         // legacy key/value representation, including repeated/zero weights.
         std::mt19937 rng(0);

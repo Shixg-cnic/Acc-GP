@@ -4,6 +4,7 @@
 #include <cuda_runtime_api.h>
 #include <thrust/device_allocator.h>
 #include <thrust/device_vector.h>
+#include <thrust/system/cuda/execution_policy.h>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -83,16 +84,14 @@ public:
             throw std::bad_array_new_length();
         void* allocation = nullptr;
         CUDA_CHECK(cudaMallocFromPoolAsync(&allocation, count * sizeof(T), state_->pool, nullptr));
-        // Scratch kernels use the default stream; make allocation ready before
-        // returning to callers, preserving the previous blocking interface.
-        CUDA_CHECK(cudaStreamSynchronize(nullptr));
+        // All scratch work is ordered on the default stream. The rebalance
+        // graph explicitly waits for that stream and joins before returning,
+        // so allocation itself need not stall the host or synchronize GPUs.
         return pointer(static_cast<T*>(allocation));
     }
     void deallocate(pointer allocation, std::size_t count) {
         if (!state_) { Base::deallocate(allocation, count); return; }
-        CUDA_CHECK(cudaDeviceSynchronize());
         CUDA_CHECK(cudaFreeAsync(thrust::raw_pointer_cast(allocation), nullptr));
-        CUDA_CHECK(cudaStreamSynchronize(nullptr));
     }
     template <typename U> bool operator==(const ScratchAllocator<U>& other) const {
         return state_ == other.state_;
@@ -104,5 +103,13 @@ public:
 
 template <typename T>
 using ScratchVector = thrust::device_vector<T, ScratchAllocator<T>>;
+
+// Thrust's internal sort/scan/reduction buffers share the pipeline pool too.
+// The policy owns its allocator, so it remains valid for the whole call.
+inline auto scratch_policy() {
+    // Algorithms returning host values still perform their required sync;
+    // device-only sorts/scans can feed the next default-stream kernel directly.
+    return thrust::cuda::par_nosync(ScratchAllocator<std::uint8_t>{});
+}
 
 } // namespace gpart::detail

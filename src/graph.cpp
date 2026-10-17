@@ -39,24 +39,23 @@ std::vector<T> read_all(const std::string& path, std::int64_t count) {
 
 [[noreturn]] void standard_limit_error() {
     throw std::runtime_error(
-        "graph exceeds standard CSR limits; use gpart_coarsen_big");
+        "graph exceeds supported 32-bit CSR limits; dataset excluded");
 }
 
 }  // namespace
 
-template <typename Types>
-WeightedGraph<Types> load_weighted_graph(
+WeightedGraph load_weighted_graph(
     const std::string& indptr_path, const std::string& indices_path) {
-    using VertexT = typename Types::VertexT;
-    using OffsetT = typename Types::OffsetT;
-    using WeightT = typename Types::WeightT;
+    using VertexT = gpart::GraphTypes::VertexT;
+    using OffsetT = gpart::GraphTypes::OffsetT;
+    using WeightT = gpart::GraphTypes::WeightT;
 
     const auto offset_count = element_count(indptr_path, sizeof(std::int64_t));
     const auto edge_count = element_count(indices_path, sizeof(std::int64_t));
     if (offset_count < 1) throw std::runtime_error("empty CSR indptr");
     const auto vertex_count = offset_count - 1;
 
-    if constexpr (std::is_same_v<Types, StandardTypes>) {
+    {
         if (vertex_count > std::numeric_limits<VertexT>::max() ||
             edge_count > std::numeric_limits<OffsetT>::max() ||
             static_cast<std::uint64_t>(vertex_count) >
@@ -65,8 +64,6 @@ WeightedGraph<Types> load_weighted_graph(
                 std::numeric_limits<WeightT>::max()) {
             standard_limit_error();
         }
-    } else if (vertex_count > std::numeric_limits<VertexT>::max()) {
-        throw std::runtime_error("graph vertex ids exceed configured graph type");
     }
 
     const auto disk_offsets = read_all<std::int64_t>(indptr_path, offset_count);
@@ -74,7 +71,7 @@ WeightedGraph<Types> load_weighted_graph(
         throw std::runtime_error("CSR offsets do not match indices");
     }
 
-    WeightedGraph<Types> graph;
+    WeightedGraph graph;
     graph.offsets.resize(static_cast<std::size_t>(offset_count));
     for (std::int64_t i = 0; i < offset_count; ++i) {
         const auto offset = disk_offsets[static_cast<std::size_t>(i)];
@@ -83,10 +80,7 @@ WeightedGraph<Types> load_weighted_graph(
         }
         if (offset > static_cast<std::int64_t>(
                          std::numeric_limits<OffsetT>::max())) {
-            if constexpr (std::is_same_v<Types, StandardTypes>) {
-                standard_limit_error();
-            }
-            throw std::runtime_error("CSR offset exceeds configured graph type");
+            standard_limit_error();
         }
         graph.offsets[static_cast<std::size_t>(i)] =
             static_cast<OffsetT>(offset);
@@ -121,10 +115,9 @@ WeightedGraph<Types> load_weighted_graph(
     return graph;
 }
 
-template <typename Types>
 void validate_weighted_shape(
-    const WeightedGraph<Types>& graph, bool allow_self_loops) {
-    using OffsetT = typename Types::OffsetT;
+    const WeightedGraph& graph, bool allow_self_loops) {
+    using OffsetT = gpart::GraphTypes::OffsetT;
     if (graph.offsets.size() != graph.vertex_weights.size() + 1 ||
         graph.offsets.empty() || graph.offsets.front() != OffsetT{0} ||
         static_cast<std::int64_t>(graph.offsets.back()) != graph.edges() ||
@@ -161,9 +154,8 @@ void validate_weighted_shape(
     }
 }
 
-template <typename Types>
 void validate_weighted_csr(
-    const WeightedGraph<Types>& graph, bool allow_self_loops) {
+    const WeightedGraph& graph, bool allow_self_loops) {
     validate_weighted_shape(graph, allow_self_loops);
     for (std::int64_t v = 0; v < graph.vertices(); ++v) {
         const auto begin = graph.offsets[static_cast<std::size_t>(v)];
@@ -175,7 +167,7 @@ void validate_weighted_csr(
             const auto reverse = std::lower_bound(
                 graph.neighbors.begin() + reverse_begin,
                 graph.neighbors.begin() + reverse_end,
-                static_cast<typename Types::VertexT>(v));
+                static_cast<gpart::GraphTypes::VertexT>(v));
             if (reverse == graph.neighbors.begin() + reverse_end || *reverse != v) {
                 throw std::runtime_error("weighted CSR is not bidirectional");
             }
@@ -189,10 +181,9 @@ void validate_weighted_csr(
     }
 }
 
-template <typename Types>
 std::uint64_t host_cut(
-    const WeightedGraph<Types>& graph,
-    const std::vector<typename Types::VertexT>& labels) {
+    const WeightedGraph& graph,
+    const std::vector<gpart::GraphTypes::VertexT>& labels) {
     std::uint64_t directed = 0;
     for (std::int64_t v = 0; v < graph.vertices(); ++v) {
         for (auto e = graph.offsets[static_cast<std::size_t>(v)];
@@ -211,28 +202,35 @@ std::uint64_t host_cut(
     return directed / 2;
 }
 
-template <typename Types>
-DeviceWeightedGraph<Types> make_device_weighted(
-    const WeightedGraph<Types>& graph) {
-    DeviceWeightedGraph<Types> out;
+DeviceWeightedGraph make_device_weighted(
+    const WeightedGraph& graph, bool omit_unit_weights) {
+    if (graph.edge_weights.size()!=graph.neighbors.size())
+        throw std::invalid_argument("device graph requires one weight per edge");
+    DeviceWeightedGraph out;
+    out.implicit_unit_weights=omit_unit_weights && std::all_of(
+        graph.edge_weights.begin(), graph.edge_weights.end(),
+        [](auto weight) { return weight==1; });
     out.offsets = graph.offsets;
     out.neighbors = graph.neighbors;
-    out.edge_weights = graph.edge_weights;
+    if (!out.implicit_unit_weights) out.edge_weights = graph.edge_weights;
     out.vertex_weights = graph.vertex_weights;
     return out;
 }
 
-template <typename Types>
-WeightedGraph<Types> copy_device_weighted(
-    const DeviceWeightedGraph<Types>& graph) {
-    WeightedGraph<Types> out;
+WeightedGraph copy_device_weighted(
+    const DeviceWeightedGraph& graph) {
+    if (graph.implicit_unit_weights ? !graph.edge_weights.empty() :
+        graph.edge_weights.size()!=graph.neighbors.size())
+        throw std::invalid_argument("invalid device edge-weight storage");
+    WeightedGraph out;
     out.offsets.resize(graph.offsets.size());
     out.neighbors.resize(graph.neighbors.size());
-    out.edge_weights.resize(graph.edge_weights.size());
+    out.edge_weights.resize(graph.edges());
     out.vertex_weights.resize(graph.vertex_weights.size());
     thrust::copy(graph.offsets.begin(), graph.offsets.end(), out.offsets.begin());
     thrust::copy(graph.neighbors.begin(), graph.neighbors.end(), out.neighbors.begin());
-    thrust::copy(
+    if (graph.implicit_unit_weights) std::fill(out.edge_weights.begin(),out.edge_weights.end(),gpart::GraphTypes::WeightT{1});
+    else thrust::copy(
         graph.edge_weights.begin(), graph.edge_weights.end(), out.edge_weights.begin());
     thrust::copy(
         graph.vertex_weights.begin(), graph.vertex_weights.end(),
@@ -240,18 +238,11 @@ WeightedGraph<Types> copy_device_weighted(
     return out;
 }
 
-template WeightedGraph<ActiveTypes> load_weighted_graph<ActiveTypes>(
-    const std::string&, const std::string&);
-template void validate_weighted_shape<ActiveTypes>(
-    const WeightedGraph<ActiveTypes>&, bool);
-template void validate_weighted_csr<ActiveTypes>(
-    const WeightedGraph<ActiveTypes>&, bool);
-template std::uint64_t host_cut<ActiveTypes>(
-    const WeightedGraph<ActiveTypes>&,
-    const std::vector<typename ActiveTypes::VertexT>&);
-template DeviceWeightedGraph<ActiveTypes> make_device_weighted<ActiveTypes>(
-    const WeightedGraph<ActiveTypes>&);
-template WeightedGraph<ActiveTypes> copy_device_weighted<ActiveTypes>(
-    const DeviceWeightedGraph<ActiveTypes>&);
+
+
+
+
+
+
 
 }  // namespace gpart

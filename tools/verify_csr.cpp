@@ -38,7 +38,7 @@ int main(int argc,char** argv) {
     try {
         if (argc<6 || argc>7) throw std::runtime_error("usage: indptr indices k partition binary|text [--symmetric]");
         const int k=std::stoi(argv[3]);
-        if (k<2 || k>32) throw std::runtime_error("invalid k");
+        if (k<2 || k>128) throw std::runtime_error("invalid k");
         const bool symmetry=argc==7;
         if (symmetry && std::string(argv[6])!="--symmetric") throw std::runtime_error("invalid flag");
         Mapping<std::int64_t> offsets(argv[1]),indices(argv[2]);

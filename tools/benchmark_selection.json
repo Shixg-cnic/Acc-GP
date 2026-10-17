@@ -1,0 +1,119 @@
+{
+  "updated": "2026-10-16",
+  "dataset_root": "../dataset_benchmark",
+  "categories": {
+    "Web Crawl": [
+      "wb-edu",
+      "uk-2002"
+    ],
+    "Social Network": [
+      "enwiki-2021",
+      "com-Orkut",
+      "hollywood-2011",
+      "soc-Pokec",
+      "citation",
+      "com-LiveJournal",
+      "soc-LiveJournal1",
+      "ljournal-2008",
+      "products"
+    ],
+    "Semiconductor": [
+      "circuit5M",
+      "vas_stokes_2M",
+      "vas_stokes_4M",
+      "stokes"
+    ],
+    "Road Network": [
+      "road_usa",
+      "europe_osm"
+    ],
+    "Optimization": [
+      "nlpkkt120",
+      "nlpkkt160",
+      "nlpkkt200"
+    ],
+    "Finite Element": [
+      "fe_rotor",
+      "af_shell10",
+      "Hook_1498",
+      "Geo_1438",
+      "Serena",
+      "audikw_1",
+      "channel-500x100x100-b050",
+      "Long_Coup_dt0",
+      "dielFilterV3real",
+      "ML_Geer",
+      "Flan_1565",
+      "af_shell1",
+      "dielFilterV3clx",
+      "Long_Coup_dt6"
+    ],
+    "Biology": [
+      "ppa",
+      "cage15",
+      "kmer_V2a",
+      "kmer_U1a"
+    ],
+    "Artificial Mesh": [
+      "grid",
+      "cube",
+      "delaunay_n23",
+      "hugebubbles-00000",
+      "hugebubbles-00010",
+      "rgg_n_2_22_s0",
+      "hugebubbles-00020",
+      "delaunay_n24",
+      "rgg_n_2_23_s0",
+      "rgg_n_2_24_s0"
+    ],
+    "Artificial Complex": [
+      "kron_g500-logn20",
+      "mycielskian17",
+      "kron_g500-logn21",
+      "mycielskian18"
+    ]
+  },
+  "parts": [
+    4,
+    8,
+    16,
+    32,
+    64,
+    128
+  ],
+  "repeats": 3,
+  "imbalance": "1.03",
+  "extra_reference_graph": "products",
+  "note": "User 2026-10-16 removed five named Finite Element datasets from future experiments, in addition to three prior OOM exclusions. Retain all historical results. Current 52 named datasets (51 unique CSR structures), 14 Finite Element entries; primary k=4/8/16/32/64/128, k=2 functional only. Target each configuration >=1.2x over Jet, at least >1.15x; report both speed and cut ratios for nine categories.",
+  "functional_parts": [
+    2,
+    4,
+    8,
+    16,
+    32,
+    64,
+    128
+  ],
+  "candidate_selection_status": "compare_all_before_deciding",
+  "candidate_categories": [
+    "Finite Element",
+    "Biology",
+    "Artificial Mesh"
+  ],
+  "excluded_due_to_memory": [
+    "kmer_P1a",
+    "kmer_A2a",
+    "kmer_V1r"
+  ],
+  "excluded_by_user": [
+    "Cube_Coup_dt6",
+    "Queen_4147",
+    "HV15R",
+    "Cube_Coup_dt0",
+    "Bump_2911"
+  ],
+  "performance_targets": {
+    "target_speedup_over_jet": 1.2,
+    "minimum_speedup_over_jet": 1.15
+  }
+}

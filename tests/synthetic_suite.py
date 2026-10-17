@@ -15,6 +15,7 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from verify_partition import verify
+from result_storage import discard_partition, experiment_path, publish_tables, write_run_table
 
 
 def generate(root: Path, kind: str, n: int, seed: int = 17) -> tuple[Path, Path]:
@@ -64,15 +65,16 @@ def generate(root: Path, kind: str, n: int, seed: int = 17) -> tuple[Path, Path]
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--build", type=Path, default=Path("build-5090"))
+    parser.add_argument("--build", type=Path, default=Path("build"))
     parser.add_argument("--output", type=Path, default=Path("results/synthetic"))
     parser.add_argument("--vertices", type=int, default=16384)
     parser.add_argument("--parts", type=int, nargs="+", default=[2, 4, 8, 32])
     parser.add_argument("--kinds", nargs="+", default=["social", "circuit", "disconnected"])
     parser.add_argument("--repeats", type=int, default=2)
-    parser.add_argument("--variants", nargs="+", default=["standard", "big"])
+    parser.add_argument("--variants", nargs="+", choices=["standard"], default=["standard"])
     parser.add_argument("--verify", action="store_true")
     args = parser.parse_args()
+    args.output = experiment_path(args.output)
     if args.vertices < 32 or args.vertices % 8 or args.repeats < 1:
         parser.error("vertices must be a multiple of eight >=32; repeats must be positive")
     results = []
@@ -108,9 +110,14 @@ def main() -> None:
                                   timing={key: float(value) for key, value in
                                           re.findall(r"(\w+_seconds)=([0-9.e+-]+)", timings)})
                     results.append(result)
+                    # Save exact checks before discarding temporary vertex labels.
+                    (args.output / "summary.json").write_text(json.dumps(results, indent=2) + "\n")
+                    discard_partition({"partition":str(partition)})
                     print(json.dumps(result, sort_keys=True), flush=True)
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output / "summary.json").write_text(json.dumps(results, indent=2) + "\n")
+    write_run_table(args.output / "runs.csv", [dict(graph=r["kind"], k=r["parts"], method=r["variant"], repeat=r["repeat"], verified=True, exact=r, timing=r["timing"], partition_deleted=True) for r in results])
+    publish_tables(args.output)
 
 
 if __name__ == "__main__":

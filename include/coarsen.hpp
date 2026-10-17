@@ -21,18 +21,30 @@ struct CoarsenOptions {
     // Cluster capacity is ceil(total_weight / (cluster_size_factor * parts)).
     int cluster_size_factor = kBeta;
     bool pack_isolated = false;
+    // Start with fine clusters, then relax the bound as graph size falls.
+    // The final cutoff still uses cluster_size_factor.
+    bool progressive_cluster_capacity = false;
+    int progressive_fine_factor = 64;
+    int progressive_capacity_growth = 8;
+    // Optional GPU subphase telemetry; complete native wall time is always measured.
+    bool detailed_timings = true;
+    // Exact short-row CSR builder; false retains global radix contraction.
+    bool row_local_contraction = true;
+    // Optional one-pass HEM seed within regret aggregation. No trial/restart.
+    bool seed_matching = true;
+    // Skip regret statistics only when every request provably fits.
+    bool capacity_safe_fast_path = true;
+    int heavy_edge_degree_limit = 64;
 };
 
-template <typename Types>
 struct DeviceAggregateResult {
-    thrust::device_vector<typename Types::VertexT> map;
-    thrust::device_vector<typename Types::WeightT> vertex_weights;
-    typename Types::VertexT coarse_vertices = 0;
+    detail::ScratchVector<gpart::GraphTypes::VertexT> map;
+    detail::ScratchVector<gpart::GraphTypes::WeightT> vertex_weights;
+    gpart::GraphTypes::VertexT coarse_vertices = 0;
     std::uint64_t maximum_weight = 0;
     std::uint64_t capacity = 0;
 };
 
-template <typename Types>
 class SclpWorkspace {
 public:
     SclpWorkspace();
@@ -49,6 +61,8 @@ public:
 };
 
 struct SclpStats {
+    std::uint64_t maximum_degree=std::numeric_limits<std::uint64_t>::max();
+    bool has_heavy_rows = true;
     std::uint64_t capacity = 0;
     std::uint64_t lp_accepted = 0;
     std::uint64_t capacity_rejected = 0;
@@ -77,27 +91,24 @@ struct ContractionTimings {
     double vertex_weight_seconds = 0.0;
 };
 
-template <typename Types>
-DeviceAggregateResult<Types> aggregate(
-    const DeviceWeightedGraph<Types>& graph, SclpWorkspace<Types>& workspace,
+DeviceAggregateResult aggregate(
+    const DeviceWeightedGraph& graph, SclpWorkspace& workspace,
     int parts, std::uint32_t seed,
     int level, SclpStats& stats, bool diagnostics,
-    int cluster_size_factor = kBeta, bool pack_isolated = false);
+    int cluster_size_factor = kBeta, bool pack_isolated = false,
+    bool seed_matching = false, bool capacity_safe_fast_path = true);
 
-template <typename Types>
-DeviceWeightedGraph<Types> contract(
-    DeviceWeightedGraph<Types> fine,
-    DeviceAggregateResult<Types>&& aggregate,
-    SclpWorkspace<Types>& workspace, ContractionTimings& timings);
+DeviceWeightedGraph contract(
+    DeviceWeightedGraph fine,
+    DeviceAggregateResult&& aggregate,
+    SclpWorkspace& workspace, ContractionTimings& timings);
 
-template <typename Types>
-Hierarchy<Types> coarsen(
-    const WeightedGraph<Types>& graph, const CoarsenOptions& options);
+Hierarchy coarsen(
+    const WeightedGraph& graph, const CoarsenOptions& options);
 
 // Input is already validated/uploaded; allocation of coarsening workspace
 // remains inside this call and therefore inside the partition timing.
-template <typename Types>
-DeviceHierarchy<Types> coarsen(
-    DeviceWeightedGraph<Types>&& graph, const CoarsenOptions& options);
+DeviceHierarchy coarsen(
+    DeviceWeightedGraph&& graph, const CoarsenOptions& options);
 
 }  // namespace gpart
