@@ -54,6 +54,23 @@ REFERENCE_BIN="$PWD/../Acc-GP-archive/maintenance/before-regret-mainline-2026101
 
 比较旧residual可将REFERENCE_COARSEN_MODE改为residual（上述归档binary仍支持）。每次模式/源码改变都使用新工作目录；归档历史实验不得用新binary续跑。CSV同时输出相对reference的速度和cut比。
 
+## 候选筛选的独立实验开关
+
+默认仍为legacy细化；joint/joint-polish默认也保持原候选行为。完成编译后，可逐项比较以下三种配置，每次使用新的工作目录：
+
+```bash
+# 原候选，作为本轮对照
+GPART_REFINE_MODE=joint-polish GPART_JOINT_DEDUPLICATE=0 GPART_JOINT_CONFLICT_ROUNDS=1 ./run.sh
+# 只去除同种子双策略完全相同的移动
+GPART_REFINE_MODE=joint-polish GPART_JOINT_DEDUPLICATE=1 GPART_JOINT_CONFLICT_ROUNDS=1 ./run.sh
+# 只增加冲突恢复，最多3轮
+GPART_REFINE_MODE=joint-polish GPART_JOINT_DEDUPLICATE=0 GPART_JOINT_CONFLICT_ROUNDS=3 ./run.sh
+```
+
+可以同时加`GRAPHS="road_usa grid products af_shell10" PARTS="8 128"`缩小范围。该轮数是每批候选的冲突恢复次数，范围1..4，与`GPART_JOINT_ROUNDS`生长批数不同。更多候选不保证最终质量改善。九类代表图补测中，去重/三轮冲突相对原候选分别为0.9998×/0.9961×，均未见整体收益；默认不启用。
+
+直接运行划分器时，`GPART_JOINT_DIAGNOSTICS=1`会输出`joint_filter`逐批计数：生成、去重后、首轮/最终无冲突、前缀选中事务、移动顶点和实际cut收益。诊断增加计数与同步，只用于解释筛选；`run.sh`自动移除此变量，使正式计时不混入该开销。已完成55个同一LP检查点的筛选配置对照；旧legacy移动逐项重放与GPU热点剖析尚未完成。结果见[最新效果表](results/manual/joint-filter-effects-20261017/comparison.csv)和[九类切边比](results/manual/joint-filter-effects-20261017/categories.csv)。
+
 ## 一键运行
 
 ```bash

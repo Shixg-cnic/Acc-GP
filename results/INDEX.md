@@ -1,5 +1,7 @@
 # 实验结果表格索引
 
+2026-10-17 筛选开关效果补测（九类各一图×k8/128×5次×四方法，共360份全核验）：[逐配置](manual/joint-filter-effects-20261017/comparison.csv)、[九类速度与cut比](manual/joint-filter-effects-20261017/categories.csv)、[逐次/阶段](manual/joint-filter-effects-20261017/runs.csv)。ours=只开冲突3轮，dedup=只去重，reference=冻结原joint-polish 75c4b698，jet=同批Jet。去重/冲突速度0.99983×/0.99607×、cut比0.99959/1.00132，未提升默认。固定4图两k、55个共同LP状态的[165份核验结果](manual/joint-filter-effects-20261017/fixed_lp.csv)与[330批筛选计数](manual/joint-filter-effects-20261017/fixed_lp_stages.csv)：去重全部同标签；冲突15处好、34同、6差。原始材料在archive/experiments/joint-filter-effects-20261017；不是52图六k全集。
+
 2026-10-17 新双向组候选（joint-polish，2批，九类各一图×k8/128×3次，162份输出全核验）：[逐配置](manual/joint-final-20261017/comparison.csv)、[九类速度和切边比](manual/joint-final-20261017/categories.csv)、[逐次及阶段](manual/joint-final-20261017/runs.csv)。对本轮前dd536dfc总体1.04118×、cut比1.00724；对Jet1.42366×、cut比1.06979。路网cut退步约5%，未替换默认。独立joint首版失败和32种子组合初筛分别见[独立失败记录](manual/joint-pilot-20261017/comparison.csv)、[组合初筛](manual/joint-polish-pilot-20261017/comparison.csv)，不混入最终表格。
 
 

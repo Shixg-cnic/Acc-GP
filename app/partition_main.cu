@@ -115,7 +115,25 @@ int main(int argc, char** argv) {
         else if (refine_mode=="joint-polish") refine_options.mode=gpart::RefinementMode::JointPolish;
         else if (refine_mode!="legacy") throw std::invalid_argument("GPART_REFINE_MODE must be legacy, joint, or joint-polish");
         if (const char* count=std::getenv("GPART_JOINT_ROUNDS")) refine_options.joint_rounds=std::stoi(count);
-        std::cout << "refine_mode=" << refine_mode << " joint_rounds=" << refine_options.joint_rounds << '\n';
+        if (const char* count=std::getenv("GPART_JOINT_CONFLICT_ROUNDS")) {
+            std::size_t used=0;
+            refine_options.joint_conflict_rounds=std::stoi(count,&used);
+            if (count[used] || refine_options.joint_conflict_rounds<1 || refine_options.joint_conflict_rounds>4)
+                throw std::invalid_argument("GPART_JOINT_CONFLICT_ROUNDS must be 1..4");
+        }
+        auto joint_flag=[](const char* name) {
+            const char* value=std::getenv(name);
+            if (!value) return false;
+            if (std::string(value)=="1") return true;
+            if (std::string(value)=="0") return false;
+            throw std::invalid_argument(std::string(name)+" must be 0 or 1");
+        };
+        refine_options.joint_deduplicate=joint_flag("GPART_JOINT_DEDUPLICATE");
+        refine_options.joint_diagnostics=joint_flag("GPART_JOINT_DIAGNOSTICS");
+        std::cout << "refine_mode=" << refine_mode << " joint_rounds=" << refine_options.joint_rounds
+                  << " joint_conflict_rounds=" << refine_options.joint_conflict_rounds
+                  << " joint_deduplicate=" << refine_options.joint_deduplicate
+                  << " joint_diagnostics=" << refine_options.joint_diagnostics << '\n';
         refine_options.parts = parts;
         refine_options.allow_initial_imbalance = true;
         refine_options.imbalance_ratio = imbalance;

@@ -120,3 +120,7 @@ g_partition/
 2026-10-17 row512：未新增维护脚本。`coarsen_rows.cuh`提供32/64/128与256/512项行内排序，长短行kernel分离；`coarsen.cu`选择局部或全局精确CSR。`test_uncoarsen.cu`覆盖129/255/256/257/511/512边界及完整长行粗图/map与全局路径对照。临时8/32线程搬运候选已撤回，源码/失败计时存于仓库外，results保留CSV。
 
 2026-10-17 细化实现：删除big构建目标、图宽度模板和自动选择big路径；`graph_types.hpp`仅提供固定GraphTypes。新增`src/refine_joint.cuh`（净容量引导双向连通组、分区对匹配、整组冲突剔除和精确前缀）与`tests/test_joint_events.cu`（逐前缀CPU完整切边oracle）。`test_uncoarsen.cu`增加负收益起步与所有k的加权随机核验。
+
+2026-10-17 外部审查后的筛选实验：未新增维护文件。`refine_joint.cuh`新增双策略完全相同移动去重、有界冲突恢复及诊断前缀谓词；`refine_incremental.cuh`编排可选路径并输出筛选计数；`refine.hpp`/CLI新增独立开关。`test_joint_events.cu`增加CPU冲突图oracle、H/X/Y完整CSR检查与前缀局限反例；`test_uncoarsen.cu`覆盖开关、所有亲和力布局和正式k范围；`test_manual_workflow.py`检查计时入口移除额外诊断。
+
+2026-10-17效果补测：没有新增维护源码或报告脚本。results/manual/joint-filter-effects-20261017的runs/comparison/categories为两组共360次原生结果合并；fixed_lp.csv是同LP状态的165份完整CPU核验结果，fixed_lp_stages.csv是330批筛选计数。临时四方法runner、固定LP C++驱动、冻结版本与日志均在同级archive，不进入生产构建。

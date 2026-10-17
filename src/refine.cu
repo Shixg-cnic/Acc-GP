@@ -262,7 +262,7 @@ public:
     detail::ScratchBuffer<unsigned long long> balance_bucket_offsets;
     detail::ScratchBuffer<JointMove> joint_moves;
     detail::ScratchBuffer<unsigned long long> joint_quotient, joint_seeds, joint_events;
-    detail::ScratchBuffer<int> joint_partner, joint_visits, joint_stops;
+    detail::ScratchBuffer<int> joint_partner, joint_visits, joint_stops, joint_selected;
     detail::ScratchBuffer<BoundaryGroup> boundary_groups;
     detail::ScratchBuffer<GroupTransaction> group_transactions;
     detail::ScratchBuffer<std::int32_t> group_order;
@@ -325,6 +325,7 @@ public:
             options.max_rounds < 0 || options.max_rounds > 64 ||
             options.stale_rounds < 1 || options.stale_rounds > 64 ||
             options.joint_rounds < 0 || options.joint_rounds > 32 ||
+            options.joint_conflict_rounds < 1 || options.joint_conflict_rounds > 4 ||
             options.boundary_group_rounds < 0 || options.boundary_group_rounds > 8 ||
             !std::isfinite(options.refinement_growth_ratio) || options.refinement_growth_ratio < 1.0 ||
             !std::isfinite(options.imbalance_ratio) ||
@@ -503,6 +504,7 @@ DeviceUncoarsenResult refine_hierarchy_impl(
     if (options.parts < 2 || options.parts > kMaxParts || options.max_rounds < 0 ||
         options.max_rounds > 64 || options.stale_rounds < 1 || options.stale_rounds > 64 ||
         options.joint_rounds < 0 || options.joint_rounds > 32 ||
+            options.joint_conflict_rounds < 1 || options.joint_conflict_rounds > 4 ||
             options.boundary_group_rounds < 0 || options.boundary_group_rounds > 8 ||
         !std::isfinite(options.refinement_growth_ratio) || options.refinement_growth_ratio < 1.0 ||
         !std::isfinite(options.imbalance_ratio) ||

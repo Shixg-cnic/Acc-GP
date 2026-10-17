@@ -13,6 +13,22 @@ struct JointMove {
 struct EmptyJointMove {
     __host__ __device__ bool operator()(const JointMove& x) const { return x.size==0; }
 };
+// Equality is by the complete vertex set and the canonical partition pair,
+// not by weight or gain alone. Different shapes remain distinct candidates.
+__host__ __device__ bool joint_same_move(const JointMove& x,const JointMove& y) {
+    if(!x.size || x.size!=y.size || x.a!=y.a || x.b!=y.b ||
+       x.gain!=y.gain || x.net!=y.net) return false;
+    for(int j=0;j<x.size;++j) {
+        bool found=false;
+        for(int t=0;t<y.size;++t) found|=x.vertices[j]==y.vertices[t];
+        if(!found) return false;
+    }
+    return true; // Grow guarantees distinct vertices within each move.
+}
+__global__ void joint_deduplicate_policies(int slots,JointMove* moves) {
+    const int i=2*(blockIdx.x*blockDim.x+threadIdx.x);
+    if(i+1<slots && joint_same_move(moves[i],moves[i+1])) moves[i+1].size=0;
+}
 struct JointOrder {
     __host__ __device__ bool operator()(const JointMove& x,const JointMove& y) const {
         if ((x.size!=0)!=(y.size!=0)) return x.size!=0;
@@ -188,6 +204,35 @@ __global__ void joint_resolve(int count,JointMove* moves,const int* owners) {
         moves[i].size=0;break; // Reject the entire exchange, never one side.
     }
 }
+// Previously accepted moves keep their vertices for the rest of the batch.
+// Unsuccessful claimants keep their complete move and may try again. Separate
+// claim and resolve launches avoid reading a concurrently updated accepted set.
+__global__ void joint_retry_claim(int count,const JointMove* moves,
+    const int* accepted,const int* occupied,int* owners) {
+    const int i=blockIdx.x*blockDim.x+threadIdx.x;
+    if(i>=count || !moves[i].size || accepted[i]) return;
+    for(int j=0;j<moves[i].size;++j) if(occupied[moves[i].vertices[j]]>=0) return;
+    for(int j=0;j<moves[i].size;++j) atomicMin(owners+moves[i].vertices[j],i);
+}
+__global__ void joint_retry_resolve(int count,const JointMove* moves,
+    const int* owners,int* accepted,int* occupied) {
+    const int i=blockIdx.x*blockDim.x+threadIdx.x;
+    if(i>=count || !moves[i].size || accepted[i]) return;
+    for(int j=0;j<moves[i].size;++j) if(owners[moves[i].vertices[j]]!=i) return;
+    accepted[i]=1;
+    for(int j=0;j<moves[i].size;++j) occupied[moves[i].vertices[j]]=i;
+}
+__global__ void joint_retry_finish(int count,JointMove* moves,const int* accepted) {
+    const int i=blockIdx.x*blockDim.x+threadIdx.x;
+    if(i<count && !accepted[i]) moves[i].size=0;
+}
+struct JointAcceptedByPrefix {
+    const JointMove* moves;
+    const int* stops;
+    __device__ bool operator()(int i) const {
+        return moves[i].size && i<=stops[moves[i].a];
+    }
+};
 __global__ void joint_mark(int count,const JointMove* moves,const int* labels,
                           int* owners,int* targets) {
     const int i=blockIdx.x*blockDim.x+threadIdx.x;

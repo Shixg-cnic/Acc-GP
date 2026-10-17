@@ -199,10 +199,12 @@ void check_joint_refinement() {
         for(auto [u,w]:row) {graph.neighbors.push_back(u);graph.edge_weights.push_back(w);}
         graph.offsets.push_back(graph.neighbors.size());
     }
-    for(auto layout : {gpart::AffinityLayout::Dense,gpart::AffinityLayout::Sparse,gpart::AffinityLayout::OnDemand}) {
+    for(auto layout : {gpart::AffinityLayout::Dense,gpart::AffinityLayout::Sparse,gpart::AffinityLayout::OnDemand})
+    for(int conflict_rounds : {1,2,4}) for(bool dedup : {false,true}) {
         std::vector<int> labels{0,0,0,1,1,1,0,0,1,1};
         gpart::RefineOptions options;options.parts=2;options.mode=gpart::RefinementMode::Joint;
         options.affinity_layout=layout;options.strict_verify=true;options.joint_rounds=4;
+        options.joint_conflict_rounds=conflict_rounds;options.joint_deduplicate=dedup;
         gpart::RefineStats stats;gpart::refine_partition(graph,labels,options,&stats);
         require(stats.lp_cut_gain==0 && stats.lp_cut_loss==0,"joint mode unexpectedly ran LP");
         require(stats.final_cut==3 && gpart::host_cut(graph,labels)==3 && stats.group_cut_gain==24,
@@ -226,8 +228,11 @@ void check_joint_refinement() {
             for(auto [u,w]:row) {g.neighbors.push_back(u);g.edge_weights.push_back(w);}
             g.offsets.push_back(g.neighbors.size());
         }
+        for(auto mode : {gpart::RefinementMode::Joint,gpart::RefinementMode::JointPolish}) {
         auto labels=initial;gpart::RefineOptions o;o.parts=k;o.strict_verify=true;
-        o.mode=gpart::RefinementMode::Joint;o.joint_rounds=4;
+        o.mode=mode;o.joint_rounds=4;
+        o.joint_conflict_rounds=trial+2;o.joint_deduplicate=trial!=1;
+        o.joint_diagnostics=(k==4 && trial==0 && mode==gpart::RefinementMode::Joint);
         o.affinity_layout=trial==0 ? gpart::AffinityLayout::Dense : trial==1 ? gpart::AffinityLayout::Sparse : gpart::AffinityLayout::OnDemand;
         gpart::RefineStats stats;gpart::refine_partition(g,labels,o,&stats);
         std::vector<std::uint64_t> loads(k);
@@ -235,6 +240,7 @@ void check_joint_refinement() {
         require(*std::max_element(loads.begin(),loads.end())<=37,"joint random capacity violated");
         require(stats.final_cut==gpart::host_cut(g,labels) && stats.final_cut<=gpart::host_cut(g,initial),
                 "joint random result violates exact monotonicity");
+        }
     }
 }
 

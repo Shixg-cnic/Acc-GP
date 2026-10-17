@@ -11,7 +11,8 @@ Compile yourself in build/. The script never compiles anything.
 Settings: GPU=auto|index|UUID, GRAPHS="grid products", PARTS="4 8", REPEATS=3,
           BUILD_DIR, DATA_DIR, JET_BIN, COMPARE_JET=0,
           GPART_COARSEN_MODE=regret, GPART_REFINE_MODE=legacy|joint|joint-polish,
-          GPART_JOINT_ROUNDS=2, REFERENCE_BIN,
+          GPART_JOINT_ROUNDS=2, GPART_JOINT_CONFLICT_ROUNDS=1..4,
+          GPART_JOINT_DEDUPLICATE=0|1, REFERENCE_BIN,
           REFERENCE_COARSEN_MODE (optional, for Acc-GP reference binaries), TIMEOUT=600.
 Results: results/manual/<run-name>/*.csv; raw logs outside the source repository.
 Re-run with the same work-directory to resume an interrupted experiment.
@@ -95,7 +96,7 @@ try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
 except BlockingIOError: raise SystemExit('This experiment is already running.')
 published = Path(os.environ.get('RESULTS_DIR', str(root / 'results/manual' / out.name))).resolve()
 env = dict(os.environ, OMP_NUM_THREADS='4')
-for key in ['GPART_GPU_TIMINGS', 'SCLP_DIAGNOSTICS']: env.pop(key, None)
+for key in ['GPART_GPU_TIMINGS', 'SCLP_DIAGNOSTICS', 'GPART_JOINT_DIAGNOSTICS']: env.pop(key, None)
 ours_mode = env.get('GPART_COARSEN_MODE', 'regret')
 if ours_mode != 'regret': raise SystemExit('Only regret coarsening is maintained; use REFERENCE_BIN for archived modes.')
 method_overrides = {method: {} for method in methods}

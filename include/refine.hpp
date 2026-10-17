@@ -15,6 +15,9 @@ enum class AffinityLayout { Automatic, Dense, Sparse, OnDemand };
 struct RefineOptions {
     RefinementMode mode = RefinementMode::Legacy;
     int joint_rounds = 2;
+    int joint_conflict_rounds = 1; // 1 preserves the original single claim.
+    bool joint_deduplicate = false; // Equal outputs from the two seed policies.
+    bool joint_diagnostics = false; // Extra counting/synchronization; not for timing.
     int parts = 4;
     double imbalance_ratio = 1.03;
     int max_rounds = 32;

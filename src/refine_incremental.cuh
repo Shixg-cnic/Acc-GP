@@ -1073,6 +1073,7 @@ RefineStats run_incremental_refinement_typed(
         ws.grow(ws.joint_visits,k*k);ws.grow(ws.joint_partner,k);
         ws.grow(ws.joint_seeds,k*seed_width);ws.grow(ws.joint_events,slots);
         ws.grow(ws.joint_stops,k);
+        if(options.joint_conflict_rounds>1) ws.grow(ws.joint_selected,slots);
         auto* joint=thrust::raw_pointer_cast(ws.joint_moves.data());
         auto* quotient=thrust::raw_pointer_cast(ws.joint_quotient.data());
         auto* visits=thrust::raw_pointer_cast(ws.joint_visits.data());
@@ -1091,13 +1092,46 @@ RefineStats run_incremental_refinement_typed(
             joint_seeds<<<std::min(context.vertex_blocks,1024),256>>>(n,labels,cache,partner,seeds,seed_width,pass);
             joint_grow<<<(slots+7)/8,256>>>(slots,seed_width,seeds,partner,offsets,neighbors,weights,vertex_weights,labels,cache,part_weights,context.capacity,joint);
             CUDA_CHECK(cudaGetLastError());
+            int generated=0;
+            if(options.joint_diagnostics)
+                generated=slots-static_cast<int>(thrust::count_if(detail::scratch_policy(),
+                    ws.joint_moves.begin(),ws.joint_moves.begin()+slots,EmptyJointMove{}));
+            if(options.joint_deduplicate)
+                joint_deduplicate_policies<<<(slots/2+255)/256,256>>>(slots,joint);
             const auto end=thrust::remove_if(detail::scratch_policy(),ws.joint_moves.begin(),ws.joint_moves.begin()+slots,EmptyJointMove{});
             const int active=static_cast<int>(end-ws.joint_moves.begin());
-            if(!active) { if(++empty_joint>=2) break;continue; }
+            if(!active) {
+                if(options.joint_diagnostics)
+                    std::cout << "joint_filter n=" << n << " k=" << k << " pass=" << pass
+                              << " generated=" << generated << " after_policy_dedup=0 first_survivors=0 survivors=0 selected_transactions=0 moved_vertices=0 cut_gain=0\n";
+                if(++empty_joint>=2) break;continue;
+            }
             thrust::sort(detail::scratch_policy(),ws.joint_moves.begin(),end,JointOrder{});
-            thrust::fill(detail::scratch_policy(),ws.incremental_locks.begin(),ws.incremental_locks.begin()+n,INT_MAX);
-            joint_claim<<<(active+255)/256,256>>>(active,joint,locks);
-            joint_resolve<<<(active+255)/256,256>>>(active,joint,locks);
+            int first_survivors=0,survivors=0;
+            if(options.joint_conflict_rounds==1) {
+                thrust::fill(detail::scratch_policy(),ws.incremental_locks.begin(),ws.incremental_locks.begin()+n,INT_MAX);
+                joint_claim<<<(active+255)/256,256>>>(active,joint,locks);
+                joint_resolve<<<(active+255)/256,256>>>(active,joint,locks);
+            } else {
+                auto* selected=thrust::raw_pointer_cast(ws.joint_selected.data());
+                CUDA_CHECK(cudaMemsetAsync(selected,0,active*sizeof(*selected)));
+                // targets is scratch here; joint_mark overwrites every surviving
+                // vertex target before events/apply. No graph labels are changed.
+                CUDA_CHECK(cudaMemsetAsync(targets,0xff,n*sizeof(*targets)));
+                for(int retry=0;retry<options.joint_conflict_rounds;++retry) {
+                    thrust::fill(detail::scratch_policy(),ws.incremental_locks.begin(),ws.incremental_locks.begin()+n,INT_MAX);
+                    joint_retry_claim<<<(active+255)/256,256>>>(active,joint,selected,targets,locks);
+                    joint_retry_resolve<<<(active+255)/256,256>>>(active,joint,locks,selected,targets);
+                    if(options.joint_diagnostics && retry==0)
+                        first_survivors=static_cast<int>(thrust::count(detail::scratch_policy(),
+                            ws.joint_selected.begin(),ws.joint_selected.begin()+active,1));
+                }
+                joint_retry_finish<<<(active+255)/256,256>>>(active,joint,selected);
+            }
+            if(options.joint_diagnostics) {
+                survivors=active-static_cast<int>(thrust::count_if(detail::scratch_policy(),ws.joint_moves.begin(),end,EmptyJointMove{}));
+                if(options.joint_conflict_rounds==1) first_survivors=survivors;
+            }
             thrust::fill(detail::scratch_policy(),ws.incremental_locks.begin(),ws.incremental_locks.begin()+n,INT_MAX);
             joint_mark<<<(active+255)/256,256>>>(active,joint,labels,locks,targets);
             CUDA_CHECK(cudaMemsetAsync(events,0,active*sizeof(*events)));
@@ -1107,12 +1141,27 @@ RefineStats run_incremental_refinement_typed(
             joint_accept<<<(active+255)/256,256>>>(active,joint,stops,flags);
             CUDA_CHECK(cudaGetLastError());
             const auto count=compact_movers();
-            if (!count) { if(++empty_joint>=2) break;continue; }
+            int transactions=0;
+            if(options.joint_diagnostics)
+                transactions=static_cast<int>(thrust::count_if(detail::scratch_policy(),
+                    thrust::make_counting_iterator(0),thrust::make_counting_iterator(active),
+                    JointAcceptedByPrefix{joint,stops}));
+            const auto before_cut=current_cut;
+            auto log_filter=[&]() {
+                if(options.joint_diagnostics)
+                    std::cout << "joint_filter n=" << n << " k=" << k << " pass=" << pass
+                              << " generated=" << generated << " after_policy_dedup=" << active
+                              << " first_survivors=" << first_survivors << " survivors=" << survivors
+                              << " selected_transactions=" << transactions << " moved_vertices=" << count
+                              << " cut_gain=" << before_cut-current_cut << '\n';
+            };
+            if (!count) { log_filter();if(++empty_joint>=2) break;continue; }
             empty_joint=0;
             apply(count,MovePhase::Group);
             if(maximum()>context.capacity || current_cut>=best_cut)
                 throw std::runtime_error("joint exchange violated cut/capacity");
             best_cut=current_cut;
+            log_filter();
         }
     }
     // Every committed batch updates the exact affected-edge cut. Strict mode

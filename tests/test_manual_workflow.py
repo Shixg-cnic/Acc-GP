@@ -35,6 +35,7 @@ class ManualWorkflow(unittest.TestCase):
 from array import array
 import os, sys
 from pathlib import Path
+assert 'GPART_JOINT_DIAGNOSTICS' not in os.environ
 mode = os.environ['GPART_COARSEN_MODE']
 assert mode in ['residual', 'legacy', 'regret']
 k = int(sys.argv[3])
@@ -55,7 +56,7 @@ Path(sys.argv[4]).write_text(json.dumps([{'total-duration-seconds': 4, 'edge-cut
             env.update(PATH=str(build) + os.pathsep + env.get('PATH', ''),
                        BUILD_DIR=str(build), DATA_DIR=str(data), JET_BIN=str(jet),
                        GPU='auto', GRAPHS='grid', PARTS='4', REPEATS='2', TIMEOUT='10',
-                       COMPARE_JET='1', COMPARE_LEGACY='0',
+                       COMPARE_JET='1', COMPARE_LEGACY='0', GPART_JOINT_DIAGNOSTICS='1',
                        LATEST_FILE=str(base / 'LATEST'), RESULTS_DIR=str(base / 'csv'))
             env.pop('REFERENCE_BIN', None)
             env.pop('REFERENCE_COARSEN_MODE', None)
