@@ -1,0 +1,4 @@
+﻿source_id,source_csv,source_csv_sha256,metadata_path,metadata_sha256
+cpu_low,../results/cpu-baselines-20261018/completed-k2-k32/runs.csv,c86d69d670b95ac3923c56dc07fcd5a9c2c9360302bbd29a49c3ae31bf684fb6,/home/shixingguo/work/g_partition/Acc-GP-archive/experiments/cpu-baselines-20261018/completed-k2-k32/metadata.json,111ba005c268e42d69396f9acd84d180a2cfe40c29f95e87824e0f8d078b6625
+cpu_high,../results/cpu-baselines/k64-k128/runs.csv,640e01908ad2d42454dac3e5e7b301e909a8eb04b7949d8971e64687fe277cfe,/home/shixingguo/work/g_partition/Acc-GP-archive/experiments/cpu-baselines/k64-k128/metadata.json,825400e5181d309ef0418363ed3dd254362787b4920bdcae266320b608a39ec1
+jet_full,../results/coarsen-20261015/final-57/runs.csv,b1624dd431a53d3415fafff49632b8ad4549f603543a1543594e1ce5b063a6e7,/home/shixingguo/work/g_partition/Acc-GP-archive/experiments/coarsen-20261015/final-57/metadata.json,1bccb6a80ceb38cf1905a0367e7663fb5101c259e9998cf4693cc65a1f54b233

@@ -22,6 +22,9 @@ struct AffinityView {
     const std::int32_t* direct_labels=nullptr;
     const std::int32_t* direct_neighbors=nullptr;
     const std::uint32_t* direct_weights=nullptr;
+    const T* row_totals=nullptr; // Immutable incident weight, excluding self loops.
+    bool repair_enumeration=false;
+    const unsigned long long* repair_slack_cdf=nullptr; // k inclusive sums + minimum positive slack.
     __host__ __device__ bool direct() const { return direct_labels!=nullptr; }
     __device__ T direct_weight(std::int64_t e) const {
         if (!direct_weights) return T{1};

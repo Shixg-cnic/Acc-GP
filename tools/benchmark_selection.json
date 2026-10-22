@@ -1,5 +1,5 @@
 {
-  "updated": "2026-10-16",
+  "updated": "2026-10-17",
   "dataset_root": "../dataset_benchmark",
   "categories": {
     "Web Crawl": [
@@ -14,8 +14,7 @@
       "citation",
       "com-LiveJournal",
       "soc-LiveJournal1",
-      "ljournal-2008",
-      "products"
+      "ljournal-2008"
     ],
     "Semiconductor": [
       "circuit5M",
@@ -83,8 +82,7 @@
   ],
   "repeats": 3,
   "imbalance": "1.03",
-  "extra_reference_graph": "products",
-  "note": "User 2026-10-16 removed five named Finite Element datasets from future experiments, in addition to three prior OOM exclusions. Retain all historical results. Current 52 named datasets (51 unique CSR structures), 14 Finite Element entries; primary k=4/8/16/32/64/128, k=2 functional only. Target each configuration >=1.2x over Jet, at least >1.15x; report both speed and cut ratios for nine categories.",
+  "note": "User 2026-10-17 removed products from future experiments; Social Network retains the eight named datasets. Five prior Finite Element removals and three OOM exclusions remain. Retain all historical results. Current 51 named datasets (50 unique CSR structures), 14 Finite Element entries; primary k=4/8/16/32/64/128, k=2 functional only. Target each configuration >=1.2x over Jet, at least >1.15x; report both speed and cut ratios for nine categories.",
   "functional_parts": [
     2,
     4,
@@ -110,7 +108,8 @@
     "Queen_4147",
     "HV15R",
     "Cube_Coup_dt0",
-    "Bump_2911"
+    "Bump_2911",
+    "products"
   ],
   "performance_targets": {
     "target_speedup_over_jet": 1.2,

@@ -5,6 +5,7 @@
 namespace {
 constexpr int kJointSeeds=128;
 constexpr int kJointSide=4;
+constexpr int kJointArchive=4; // Short fragments; the original feasible path still grows to eight.
 struct JointMove {
     int vertices[2*kJointSide]={-1,-1,-1,-1,-1,-1,-1,-1};
     int size=0,a=-1,b=-1,id=0;
@@ -24,10 +25,6 @@ __host__ __device__ bool joint_same_move(const JointMove& x,const JointMove& y) 
         if(!found) return false;
     }
     return true; // Grow guarantees distinct vertices within each move.
-}
-__global__ void joint_deduplicate_policies(int slots,JointMove* moves) {
-    const int i=2*(blockIdx.x*blockDim.x+threadIdx.x);
-    if(i+1<slots && joint_same_move(moves[i],moves[i+1])) moves[i+1].size=0;
 }
 struct JointOrder {
     __host__ __device__ bool operator()(const JointMove& x,const JointMove& y) const {
@@ -99,13 +96,16 @@ template<class CacheT>
 __global__ void joint_grow(int slots,int seed_width,const unsigned long long* seeds,const int* partner,
     const int* offsets,const int* neighbors,const std::uint32_t* edges,
     const std::uint32_t* masses,const int* labels,AffinityView<CacheT> cache,
-    const unsigned long long* loads,unsigned long long capacity,JointMove* moves) {
+    const unsigned long long* loads,unsigned long long capacity,JointMove* moves,JointMove* archive) {
     const int lane=threadIdx.x&31;
     const int slot=blockIdx.x*8+threadIdx.x/32;
     if(slot>=slots) return;
     const int seed_slot=slot/2,policy=slot%2;
     JointMove best;best.id=slot;
-    if(!lane) moves[slot]=best;
+    if(!lane) {
+        moves[slot]=best;
+        for(int j=0;j<kJointArchive;++j) archive[slot*kJointArchive+j]=JointMove{};
+    }
     const auto encoded=seeds[seed_slot];
     if(encoded==ULLONG_MAX) return;
     const int root=static_cast<unsigned>(encoded),source=labels[root],target=partner[source];
@@ -117,6 +117,16 @@ __global__ void joint_grow(int slots,int seed_width,const unsigned long long* se
     const long long hi=static_cast<long long>(capacity)-static_cast<long long>(loads[target]);
     long long gain=static_cast<long long>(cache.get(root,target))-static_cast<long long>(cache.get(root,source));
     for(int step=0;step<8;++step) {
+        if(!lane && gain>0 && size<=kJointArchive) {
+            JointMove state;state.size=size;state.a=min(source,target);state.b=max(source,target);
+            state.gain=gain;state.net=source==state.a ? net : -net;state.id=slot*kJointArchive+step;
+            for(int j=0;j<size;++j) {
+                int pos=j;
+                while(pos && state.vertices[pos-1]>members[j]) {state.vertices[pos]=state.vertices[pos-1];--pos;}
+                state.vertices[pos]=members[j];
+            }
+            archive[slot*kJointArchive+step]=state;
+        }
         if(gain>best.gain && !joint_gap(net,lo,hi)) {
             best.size=size;best.a=min(source,target);best.b=max(source,target);
             best.gain=gain;best.net=source==best.a ? net : -net;
@@ -204,35 +214,6 @@ __global__ void joint_resolve(int count,JointMove* moves,const int* owners) {
         moves[i].size=0;break; // Reject the entire exchange, never one side.
     }
 }
-// Previously accepted moves keep their vertices for the rest of the batch.
-// Unsuccessful claimants keep their complete move and may try again. Separate
-// claim and resolve launches avoid reading a concurrently updated accepted set.
-__global__ void joint_retry_claim(int count,const JointMove* moves,
-    const int* accepted,const int* occupied,int* owners) {
-    const int i=blockIdx.x*blockDim.x+threadIdx.x;
-    if(i>=count || !moves[i].size || accepted[i]) return;
-    for(int j=0;j<moves[i].size;++j) if(occupied[moves[i].vertices[j]]>=0) return;
-    for(int j=0;j<moves[i].size;++j) atomicMin(owners+moves[i].vertices[j],i);
-}
-__global__ void joint_retry_resolve(int count,const JointMove* moves,
-    const int* owners,int* accepted,int* occupied) {
-    const int i=blockIdx.x*blockDim.x+threadIdx.x;
-    if(i>=count || !moves[i].size || accepted[i]) return;
-    for(int j=0;j<moves[i].size;++j) if(owners[moves[i].vertices[j]]!=i) return;
-    accepted[i]=1;
-    for(int j=0;j<moves[i].size;++j) occupied[moves[i].vertices[j]]=i;
-}
-__global__ void joint_retry_finish(int count,JointMove* moves,const int* accepted) {
-    const int i=blockIdx.x*blockDim.x+threadIdx.x;
-    if(i<count && !accepted[i]) moves[i].size=0;
-}
-struct JointAcceptedByPrefix {
-    const JointMove* moves;
-    const int* stops;
-    __device__ bool operator()(int i) const {
-        return moves[i].size && i<=stops[moves[i].a];
-    }
-};
 __global__ void joint_mark(int count,const JointMove* moves,const int* labels,
                           int* owners,int* targets) {
     const int i=blockIdx.x*blockDim.x+threadIdx.x;
@@ -248,6 +229,11 @@ __global__ void joint_events(int count,const JointMove* moves,const int* owners,
     const std::uint32_t* edges,unsigned long long* events) {
     const int lane=threadIdx.x&31,i=blockIdx.x*8+threadIdx.x/32;
     if(i>=count) return;
+    if(!moves[i].size) return; // Uniform across this transaction's warp.
+    // One warp owns transaction i. Accumulate its event locally; only the
+    // other transaction's event needs a per-edge atomic. Unsigned arithmetic
+    // preserves the original modulo-2^64 sum of signed edge contributions.
+    unsigned long long own_event=0;
     for(int j=0;j<moves[i].size;++j) {
         const int v=moves[i].vertices[j];
         for(int e=offsets[v]+lane;e<offsets[v+1];e+=32) {
@@ -258,31 +244,43 @@ __global__ void joint_events(int count,const JointMove* moves,const int* owners,
             const int before=labels[v]!=labels[u];
             if(other==i || other==INT_MAX) {
                 const int after=targets[v]!=(other==i ? targets[u] : labels[u]);
-                atomicAdd(events+i,static_cast<unsigned long long>((before-after)*w));
+                own_event+=static_cast<unsigned long long>((before-after)*w);
             } else {
-                const int first=min(i,other),last=max(i,other);
                 const int middle=i<other ? targets[v]!=labels[u] : labels[v]!=targets[u];
                 const int after=targets[v]!=targets[u];
-                atomicAdd(events+first,static_cast<unsigned long long>((before-middle)*w));
-                atomicAdd(events+last,static_cast<unsigned long long>((middle-after)*w));
+                const auto first_event=static_cast<unsigned long long>((before-middle)*w);
+                const auto last_event=static_cast<unsigned long long>((middle-after)*w);
+                own_event+=i<other ? first_event : last_event;
+                atomicAdd(events+other,i<other ? last_event : first_event);
             }
         }
     }
+    for(int d=16;d;d/=2)
+        own_event+=__shfl_down_sync(0xffffffffU,own_event,d);
+    // Other warps may also contribute to events[i], so keep an atomic flush.
+    if(!lane && own_event) atomicAdd(events+i,own_event);
 }
 __global__ void joint_prefix(int count,int k,const JointMove* moves,
     const unsigned long long* events,const unsigned long long* loads,
-    unsigned long long capacity,int* stops) {
+    unsigned long long capacity,int* stops,long long* gains=nullptr,int* counts=nullptr) {
     const int a=blockIdx.x*blockDim.x+threadIdx.x;
     if(a>=k) return;
-    long long gain=0,net=0,best=0;int stop=-1;
-    for(int i=0;i<count;++i) if(moves[i].size && moves[i].a==a) {
+    long long gain=0,net=0,best=0;int stop=-1,accepted=0,best_count=0;
+    // Input is sorted by canonical partition pair; failed claims retain a.
+    // Binary-search the segment instead of rescanning all M records for each p.
+    int low=0,high=count;
+    while(low<high) {const int mid=(low+high)/2;if(moves[mid].a<a) low=mid+1;else high=mid;}
+    for(int i=low;i<count && moves[i].a==a;++i) if(moves[i].size) {
+        ++accepted;
         gain+=static_cast<long long>(events[i]);net+=moves[i].net;
         const int b=moves[i].b;
         const long long lo=static_cast<long long>(loads[a])-static_cast<long long>(capacity);
         const long long hi=static_cast<long long>(capacity)-static_cast<long long>(loads[b]);
-        if(!joint_gap(net,lo,hi) && gain>best) {best=gain;stop=i;}
+        if(!joint_gap(net,lo,hi) && gain>best) {best=gain;stop=i;best_count=accepted;}
     }
     stops[a]=stop;
+    if(gains) gains[a]=best;
+    if(counts) counts[a]=best_count;
 }
 __global__ void joint_accept(int count,const JointMove* moves,const int* stops,int* flags) {
     const int i=blockIdx.x*blockDim.x+threadIdx.x;
@@ -290,3 +288,5 @@ __global__ void joint_accept(int count,const JointMove* moves,const int* stops,i
         for(int j=0;j<moves[i].size;++j) flags[moves[i].vertices[j]]=1;
 }
 } // namespace
+
+#include "complementary_moves.cuh"

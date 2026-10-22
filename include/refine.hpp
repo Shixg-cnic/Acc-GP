@@ -8,16 +8,9 @@
 
 namespace gpart {
 
-enum class RefinementMode { Legacy, Joint, JointPolish };
-
 enum class AffinityLayout { Automatic, Dense, Sparse, OnDemand };
 
 struct RefineOptions {
-    RefinementMode mode = RefinementMode::Legacy;
-    int joint_rounds = 2;
-    int joint_conflict_rounds = 1; // 1 preserves the original single claim.
-    bool joint_deduplicate = false; // Equal outputs from the two seed policies.
-    bool joint_diagnostics = false; // Extra counting/synchronization; not for timing.
     int parts = 4;
     double imbalance_ratio = 1.03;
     int max_rounds = 32;
@@ -25,10 +18,11 @@ struct RefineOptions {
     bool allow_initial_imbalance = false;
     int stale_rounds = 3;
     double refinement_growth_ratio = 2.0;
-    int boundary_group_rounds = 2;
+    int exchange_rounds = 2; // Library test budget; production uses two batches.
     AffinityLayout affinity_layout = AffinityLayout::Automatic;
     bool gpu_lp_loop = true; // false keeps the host-controlled reference loop.
-    bool compact_group_keys = true;
+    bool repair_enumeration = true; // Exact interior shortcut / sparse destination enumeration.
+    bool sparse_cut_bound = true; // Additional conservative layout eligibility from projected cut.
 };
 
 struct RefineStats {

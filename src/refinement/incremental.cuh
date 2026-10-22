@@ -4,6 +4,7 @@
 // implementation uses a dense affinity cache for small k, fused exact cut/cache
 // updates, and source-quota plus destination-capacity GPU rebalancing.
 namespace {
+#include "rebalance_select.cuh"
 constexpr std::int64_t kRefineHeavyDegree=4096;
 constexpr int kRefineHeavyBlocks=32;
 
@@ -71,7 +72,9 @@ __global__ void incremental_build_affinity(
     const auto v=dirty_only ? static_cast<std::int64_t>(cache.dirty_rows[index]) : index;
     if (!lane && heavy_rows && offsets[v+1]-offsets[v]>=kRefineHeavyDegree)
         heavy_rows[atomicAdd(heavy_count,1U)]=static_cast<VertexT>(v);
-    if constexpr (!Verify) if (cache.sparse() && offsets[v+1]-offsets[v]<=16) continue;
+    if constexpr (!Verify) if(cache.sparse()) {
+        if(offsets[v+1]-offsets[v]<=16) continue;
+    }
     using SumT=std::conditional_t<!Verify && sizeof(CacheT)==4,unsigned int,unsigned long long>;
     extern __shared__ unsigned long long storage[];
     auto* row=reinterpret_cast<SumT*>(storage)+warp*k;
@@ -436,18 +439,22 @@ __global__ void incremental_finish_heavy_priority(
 
 template <typename VertexT,typename WeightT,typename CacheT>
 __device__ __forceinline__ long long incremental_update_edge(
-    VertexT v,VertexT u,WeightT edge_weight,const VertexT* labels,
+    VertexT v,VertexT u,VertexT source,VertexT target,WeightT edge_weight,const VertexT* labels,
     const std::int32_t* targets,const std::int32_t* flags,int k,AffinityView<CacheT> cache) {
     if (u==v) return 0;
+    const auto old_neighbor=labels[u];
+    const bool neighbor_moves=flags[u]!=0;
+    const auto new_neighbor=neighbor_moves ? targets[u] : old_neighbor;
     cache.touch(u);
-    const auto source=labels[v],target=targets[v];
     const auto weight=static_cast<unsigned long long>(edge_weight);
     if (cache.direct()) {
         // CSR-backed affinities see the newly committed labels directly.
     } else if (cache.sparse()) {
-        if (!atomicExch(cache.dirty+u,1)) {
-            const auto slot=atomicAdd(cache.dirty_count,1ULL);
-            cache.dirty_rows[slot]=u;
+        // The flag only changes 0 -> 1 during this update kernel. A relaxed
+        // read can skip an already-dirty row; exchange still elects one writer.
+        cuda::atomic_ref<std::int32_t,cuda::thread_scope_device> dirty(cache.dirty[u]);
+        if(!dirty.load(cuda::memory_order_relaxed) && !dirty.exchange(1,cuda::memory_order_relaxed)) {
+            const auto slot=atomicAdd(cache.dirty_count,1ULL);cache.dirty_rows[slot]=u;
         }
     } else if constexpr (sizeof(CacheT)==4) {
         atomicAdd(cache.values+static_cast<std::int64_t>(u)*k+source,0U-static_cast<unsigned int>(weight));
@@ -456,10 +463,8 @@ __device__ __forceinline__ long long incremental_update_edge(
         atomicAdd(reinterpret_cast<unsigned long long*>(cache.values+static_cast<std::int64_t>(u)*k+source),0ULL-weight);
         atomicAdd(reinterpret_cast<unsigned long long*>(cache.values+static_cast<std::int64_t>(u)*k+target),weight);
     }
-    if (!flags[u] || u>v) {
-        const auto new_neighbor=flags[u] ? targets[u] : labels[u];
-        return static_cast<long long>(weight)*((source!=labels[u])-(target!=new_neighbor));
-    }
+    if (!neighbor_moves || u>v)
+        return static_cast<long long>(weight)*((source!=old_neighbor)-(target!=new_neighbor));
     return 0;
 }
 
@@ -472,19 +477,20 @@ __global__ void incremental_update_cache_and_cut(
     const std::int64_t* live_count=nullptr) {
     if (live_count) count=*live_count;
     const int lane=threadIdx.x&31;
+    unsigned long long total=0;
     for (auto i=static_cast<std::int64_t>(blockIdx.x)*8+threadIdx.x/32; i<count; i+=static_cast<std::int64_t>(gridDim.x)*8) {
-    const auto v=movers[i],source=labels[v];
+    const auto v=movers[i],source=labels[v],target=targets[v];
     if (split_heavy && offsets[v+1]-offsets[v]>=kRefineHeavyDegree) continue;
     long long gain=0;
     for (std::int64_t e=static_cast<std::int64_t>(offsets[v])+lane;e<offsets[v+1];e+=32) {
         // Each affected undirected edge contributes once, including edges
         // whose two endpoints move concurrently.
-        gain+=incremental_update_edge(v,neighbors[e],detail::edge_weight(weights,e),labels,targets,flags,k,cache);
+        gain+=incremental_update_edge(v,neighbors[e],source,target,detail::edge_weight(weights,e),labels,targets,flags,k,cache);
     }
-    for (int shift=16;shift;shift/=2) gain+=__shfl_down_sync(0xffffffffU,gain,shift);
-    if (!lane) {
-        atomicAdd(reinterpret_cast<unsigned long long*>(delta),static_cast<unsigned long long>(gain));
-        if (samples) {
+    total+=static_cast<unsigned long long>(gain);
+    if(samples) {
+        for (int shift=16;shift;shift/=2) gain+=__shfl_down_sync(0xffffffffU,gain,shift);
+        if (!lane) {
             // Charge each affected edge exactly once, using the same edge
             // ownership as the maintained cut. No extra neighbor traversal.
             atomicAdd(reinterpret_cast<unsigned long long*>(&samples[source].loss),static_cast<unsigned long long>(-gain));
@@ -492,6 +498,11 @@ __global__ void incremental_update_cache_and_cut(
         }
     }
     }
+    // Accumulate across the complete grid-stride loop. One atomic per warp
+    // replaces one per moved vertex without a block-wide synchronization.
+    // Unsigned sums retain the original modular negative-delta representation.
+    for(int d=16;d;d/=2) total+=__shfl_down_sync(0xffffffffU,total,d);
+    if(!lane && total) atomicAdd(reinterpret_cast<unsigned long long*>(delta),total);
 }
 
 template <typename OffsetT,typename VertexT,typename WeightT,typename CacheT>
@@ -502,11 +513,12 @@ __global__ void incremental_heavy_update_cache_and_cut(
     const WeightT* vertex_weights,RepairSample* samples) {
     const auto v=heavy_rows[blockIdx.x/kRefineHeavyBlocks];
     if (!flags[v]) return;
+    const auto source=labels[v],target=targets[v];
     long long gain=0;
     for (std::int64_t e=static_cast<std::int64_t>(offsets[v])+
             (blockIdx.x%kRefineHeavyBlocks)*blockDim.x+threadIdx.x;
          e<offsets[v+1];e+=kRefineHeavyBlocks*blockDim.x)
-        gain+=incremental_update_edge(v,neighbors[e],detail::edge_weight(weights,e),labels,targets,flags,k,cache);
+        gain+=incremental_update_edge(v,neighbors[e],source,target,detail::edge_weight(weights,e),labels,targets,flags,k,cache);
     for (int shift=16;shift;shift/=2) gain+=__shfl_down_sync(0xffffffffU,gain,shift);
     if (!(threadIdx.x&31)) {
         atomicAdd(reinterpret_cast<unsigned long long*>(delta),static_cast<unsigned long long>(gain));
@@ -544,7 +556,7 @@ __device__ int balance_gain_bucket(double gain) {
     return max(2,min(49,25+static_cast<int>(ceil(log(-gain)/log(1.5)))));
 }
 
-template <typename VertexT,typename WeightT,typename CacheT>
+template <typename VertexT,typename WeightT,typename CacheT,bool Enumerate=false>
 __global__ void incremental_rebalance_proposals(
     std::int64_t n,AffinityView<CacheT> cache,const VertexT* labels,const WeightT* vertex_weights,
     int k,const unsigned long long* part_weights,std::uint64_t capacity,
@@ -560,7 +572,12 @@ __global__ void incremental_rebalance_proposals(
     bucket_ids[v]=-1;
     if (part_weights[source]>capacity) {
         int best=-1;
-        std::uint64_t best_conn=0,best_slack=0;
+        std::uint64_t best_conn=0,best_slack=0,current=0;
+        if constexpr (Enumerate) {
+            const auto selected=enumerate_repair_destination(v,source,weight,k,part_weights,
+                capacity,cache,refine_mix32(static_cast<std::uint32_t>(v)));
+            best=selected.part;best_conn=selected.connection;current=selected.current;
+        } else {
         for (int p=0;p<k;++p) {
             if (p==source || part_weights[p]>=capacity || weight>capacity-part_weights[p]) continue;
             const auto value=cache.get(v,p);
@@ -584,8 +601,9 @@ __global__ void incremental_rebalance_proposals(
                 ticket-=slack;
             }
         }
+        if (best>=0) current=cache.get(v,source);
+        }
         if (best>=0) {
-            const auto current=cache.get(v,source);
             const double gain=best_conn>=current ? static_cast<double>(best_conn-current) : -static_cast<double>(current-best_conn);
             // Score loss by actual overload relief: a vertex heavier than
             // the excess cannot provide more than that excess in this step.
@@ -635,8 +653,8 @@ __global__ void balance_scan_buckets(
 
 } // namespace
 
-#include "refine_rebalance_graph.cuh"
-#include "refine_lp_graph.cuh"
+#include "rebalance_graph.cuh"
+#include "lp_graph.cuh"
 
 
 template <typename CacheT>
@@ -671,13 +689,19 @@ RefineStats run_incremental_refinement_typed(
         (options.affinity_layout==AffinityLayout::Automatic && n>=65536 &&
          graph.maximum_degree<=16 && context.has_known_cut &&
          context.known_cut<=static_cast<std::uint64_t>(n)/500);
+    // Every positive external affinity consumes at least one crossing edge
+    // incidence (integer weights >= 1). Thus sum_v q_v <= n + 2*cut.
+    // Use this upper bound only as a layout cost heuristic; the existing
+    // allocation-savings and long-row guards remain mandatory.
+    const bool cut_sparse=options.sparse_cut_bound && context.has_known_cut && k>=64 &&
+        context.known_cut<=static_cast<std::uint64_t>(n)*(k/8-1)/2;
     const bool sparse=options.affinity_layout==AffinityLayout::Sparse ||
         (options.affinity_layout==AffinityLayout::Automatic && !direct &&
          dense_bytes>=64ULL*1024*1024 && sparse_bytes<=dense_bytes-dense_bytes/4 &&
          !graph.has_heavy_rows &&
          (legacy_sparse_bytes<=dense_bytes/2 ||
           sparse_entries/static_cast<std::size_t>(n)<=8 ||
-          (context.has_known_cut && context.known_cut<=sparse_entries/40)));
+          (context.has_known_cut && context.known_cut<=sparse_entries/40) || cut_sparse));
     const auto entries=direct ? std::size_t{0} : sparse ? sparse_entries : dense_entries;
     ws.grow(affinity,entries+n);
     if (sparse) {
@@ -714,6 +738,8 @@ RefineStats run_incremental_refinement_typed(
 
     }
     auto* row_totals=cache.values+entries;
+    cache.row_totals=row_totals;
+    cache.repair_enumeration=options.repair_enumeration;
     // LP candidate lists are dead before rebalancing writes bucket IDs; the
     // cut scratch is also idle until after candidate filtering has finished.
     static_assert(std::is_same_v<gpart::GraphTypes::VertexT,std::int32_t>);
@@ -871,7 +897,6 @@ RefineStats run_incremental_refinement_typed(
     using WeightT=gpart::GraphTypes::WeightT;
     const auto maximum_edge=graph.implicit_unit_weights ? WeightT{1} : thrust::reduce(detail::scratch_policy(), graph.edge_weights.begin(),graph.edge_weights.end(),WeightT{0},thrust::maximum<WeightT>());
     const double filter=maximum_edge<=1 ? 0.25 : 0.75;
-    if (options.mode!=RefinementMode::Joint) {
     if (options.gpu_lp_loop && rounds>0 && n>=65536) {
         rebalance_graph.reset();
         LPGraph<CacheT> loop(context,cache,row_totals,options,rounds,filter,prices,samples,heavy_rows,heavy_count,heavy_corrections);
@@ -935,7 +960,6 @@ RefineStats run_incremental_refinement_typed(
         }
     }
     } // host-controlled reference loop
-    } // LP baseline / polish precursor
     stats.checkpoint_discarded_cut=current_cut>best_cut ? current_cut-best_cut : 0;
     const bool restored=revision!=best_revision;
     if (restored) {
@@ -947,221 +971,72 @@ RefineStats run_incremental_refinement_typed(
     // Restrict group search to small layers; avoid another large original
     // graph scan. Starting from the feasible checkpoint prevents repair losses
     // from contaminating either the shortlist or the transaction capacities.
-    if (options.mode==RefinementMode::Legacy && rounds>0 && options.boundary_group_rounds>0 && n<=65536) {
-        ws.grow(ws.boundary_groups,n*kGroupSize);
-        ws.grow(ws.group_transactions,k*k);
-        ws.grow(ws.group_order,n*kGroupSize);
-        ws.grow(ws.group_weight_order,n*kGroupSize);
-        ws.grow(ws.group_candidates,n*kGroupSize);
-        ws.grow(ws.group_ranges,k*k);
-        ws.grow(ws.group_active_pairs,k>=64 ? k*k : 0);
-        if (restored) {
-            launch_affinity_build(n,offsets,neighbors,weights,labels,k,cache);
-            CUDA_CHECK(cudaGetLastError());
-        }
-        for (int pass=0;pass<options.boundary_group_rounds;++pass) {
-            auto* groups=thrust::raw_pointer_cast(ws.boundary_groups.data());
-            auto* transactions=thrust::raw_pointer_cast(ws.group_transactions.data());
-            boundary_group_proposals<<<context.warp_blocks,256>>>(n,offsets,neighbors,weights,vertex_weights,labels,cache,k,groups);
-            CUDA_CHECK(cudaGetLastError());
-            const int slots=static_cast<int>(n)*kGroupSize;
-            auto order_begin=ws.group_order.begin();
-            const auto all_slots=thrust::make_counting_iterator<int>(0);
-            const auto valid_end=thrust::copy_if(detail::scratch_policy(),all_slots,all_slots+slots,
-                order_begin,ValidBoundaryGroup{groups});
-            if(valid_end==order_begin) break;
-            const int valid=static_cast<int>(valid_end-order_begin);
-            ws.grow(ws.group_sort_keys,valid);ws.grow(ws.group_sort_other,valid);
-            int pair_bits=0;
-            for (int pair=k*k-1;pair;pair>>=1) ++pair_bits;
-            detail::GroupSortLayout layout{17,64,64,pair_bits};
-            if (options.compact_group_keys && valid>=8192) {
-                ws.grow(ws.group_sort_limits,2);
-                auto* limits=thrust::raw_pointer_cast(ws.group_sort_limits.data());
-                CUDA_CHECK(cudaMemsetAsync(limits,0,2*sizeof(unsigned long long)));
-                group_order_limits<<<(valid+255)/256,256>>>(valid,
-                    thrust::raw_pointer_cast(ws.group_order.data()),groups,limits);
-                CUDA_CHECK(cudaGetLastError());
-                unsigned long long bounds[2]={};
-                CUDA_CHECK(cudaMemcpy(bounds,limits,sizeof(bounds),cudaMemcpyDeviceToHost));
-                layout=detail::GroupSortLayout::bounded(static_cast<int>(n),k,bounds[0],bounds[1]);
-            }
-            encode_group_order<<<(valid+255)/256,256>>>(valid,thrust::raw_pointer_cast(ws.group_order.data()),groups,labels,k,thrust::raw_pointer_cast(ws.group_sort_keys.data()),layout);
-            std::cout << "refine_group_sort count=" << valid << " key_bits=" << layout.end_bit()
-                      << " full_bits=" << 196+pair_bits << '\n';
-            cub::DoubleBuffer<GroupRadixKey> buffers(thrust::raw_pointer_cast(ws.group_sort_keys.data()),thrust::raw_pointer_cast(ws.group_sort_other.data()));
-            std::size_t bytes=0;
-            CUDA_CHECK(cub::DeviceRadixSort::SortKeys(nullptr,bytes,buffers,valid,GroupRadixDecomposer{},0,layout.end_bit()));
-            ws.grow(ws.group_sort_temp,bytes);
-            CUDA_CHECK(cub::DeviceRadixSort::SortKeys(thrust::raw_pointer_cast(ws.group_sort_temp.data()),bytes,buffers,valid,GroupRadixDecomposer{},0,layout.end_bit()));
-            decode_group_order<<<(valid+255)/256,256>>>(valid,buffers.Current(),thrust::raw_pointer_cast(ws.group_order.data()));
-            CUDA_CHECK(cudaGetLastError());
-            if (options.strict_verify) {
-                ws.grow(ws.group_sort_errors,1);
-                auto* errors=thrust::raw_pointer_cast(ws.group_sort_errors.data());
-                CUDA_CHECK(cudaMemsetAsync(errors,0,sizeof(*errors)));
-                validate_group_order<<<(valid+255)/256,256>>>(valid,thrust::raw_pointer_cast(ws.group_order.data()),GroupOrder{groups,labels,k},errors);
-                unsigned int bad=0;
-                CUDA_CHECK(cudaMemcpy(&bad,errors,sizeof(bad),cudaMemcpyDeviceToHost));
-                if (bad) throw std::runtime_error("radix group order differs from complete comparator");
-            }
-            const auto unique_end=thrust::unique(detail::scratch_policy(),order_begin,valid_end,SameGroup{groups,labels,k});
-            auto* order=thrust::raw_pointer_cast(ws.group_order.data());
-            const auto end=thrust::copy_if(detail::scratch_policy(),order_begin,unique_end,
-                thrust::make_counting_iterator<int>(0),ws.group_weight_order.begin(),KeepGroupWeights{order,groups,labels,k});
-            const int candidates=static_cast<int>(end-ws.group_weight_order.begin());
-            if (!candidates) break;
-            order=thrust::raw_pointer_cast(ws.group_weight_order.data());
-            auto* ranges=thrust::raw_pointer_cast(ws.group_ranges.data());
-            CUDA_CHECK(cudaMemset(ranges,0,k*k*sizeof(GroupRange)));
-            group_ranges<<<(candidates+255)/256,256>>>(candidates,order,groups,labels,k,ranges);
-            CUDA_CHECK(cudaGetLastError());
-            int base=1;
-            while (base<candidates) base*=2;
-            ws.grow(ws.group_tree,base*2);
-            auto* tree=thrust::raw_pointer_cast(ws.group_tree.data());
-            for (int start=base;;start/=256) {
-                group_tree_tile<<<(start+255)/256,256>>>(start,base,candidates,tree,order,groups);
-                CUDA_CHECK(cudaGetLastError());
-                if(start<=256) break;
-            }
-            auto* proposals=thrust::raw_pointer_cast(ws.group_candidates.data());
-            boundary_group_transactions<<<(candidates+7)/8,256>>>(candidates,order,ranges,base,tree,
-                offsets,neighbors,weights,labels,k,groups,part_weights,context.capacity,proposals);
-            CUDA_CHECK(cudaGetLastError());
-            int transaction_count=k*k;
-            int* active_pairs=nullptr;
-            if(k>=64) {
-                const auto first=thrust::make_counting_iterator<int>(0);
-                const auto end=thrust::copy_if(detail::scratch_policy(),first,first+k*k,
-                    ws.group_active_pairs.begin(),NonemptyGroupPair{ranges});
-                transaction_count=static_cast<int>(end-ws.group_active_pairs.begin());
-                active_pairs=thrust::raw_pointer_cast(ws.group_active_pairs.data());
-            }
-            if(!transaction_count) break;
-            group_reduce_transactions<<<transaction_count,256>>>(k,ranges,proposals,transactions,active_pairs);
-            CUDA_CHECK(cudaGetLastError());
-            thrust::sort(detail::scratch_policy(), ws.group_transactions.begin(),ws.group_transactions.begin()+transaction_count,TransactionOrder{});
-            CUDA_CHECK(cudaMemset(flags,0,n*sizeof(std::int32_t)));
-            boundary_group_admit<<<1,1>>>(k,transaction_count,groups,transactions,labels,part_weights,context.capacity,flags,targets);
-            CUDA_CHECK(cudaGetLastError());
-            const auto count=compact_movers();
-            if (!count) break;
-            // Different accepted transactions can share edges. Measure their
-            // complete batch gain exactly before mutating labels or the cache.
-            CUDA_CHECK(cudaMemset(thrust::raw_pointer_cast(ws.incremental_delta.data()),0,sizeof(std::int64_t)));
-            boundary_group_measure<<<static_cast<int>((count+7)/8),256>>>(count,movers,offsets,neighbors,weights,labels,targets,flags,thrust::raw_pointer_cast(ws.incremental_delta.data()));
-            CUDA_CHECK(cudaGetLastError());
-            std::int64_t gain=0;
-            CUDA_CHECK(cudaMemcpy(&gain,thrust::raw_pointer_cast(ws.incremental_delta.data()),sizeof(gain),cudaMemcpyDeviceToHost));
-            if (gain<=0) break;
-            apply(count,MovePhase::Group);
-            if (maximum()>context.capacity || current_cut!=best_cut-static_cast<std::uint64_t>(gain))
-                throw std::runtime_error("boundary group transaction violated cut/capacity");
-            best_cut=current_cut;
-        }
-    }
-    if (options.mode!=RefinementMode::Legacy && rounds>0 && options.joint_rounds>0 &&
-        (options.mode==RefinementMode::Joint || n<=65536)) {
+    if (rounds>0 && options.exchange_rounds>0 && n<=65536) {
         if (restored) {
             launch_affinity_build(n,offsets,neighbors,weights,labels,k,cache);
             CUDA_CHECK(cudaGetLastError());
         }
         const int seed_width=std::min(kJointSeeds,std::max(32,4096/k));
         const int slots=k*seed_width*2;
-        ws.grow(ws.joint_moves,slots);ws.grow(ws.joint_quotient,k*k);
-        ws.grow(ws.joint_visits,k*k);ws.grow(ws.joint_partner,k);
-        ws.grow(ws.joint_seeds,k*seed_width);ws.grow(ws.joint_events,slots);
-        ws.grow(ws.joint_stops,k);
-        if(options.joint_conflict_rounds>1) ws.grow(ws.joint_selected,slots);
-        auto* joint=thrust::raw_pointer_cast(ws.joint_moves.data());
+        ws.grow(ws.joint_moves,slots);ws.grow(ws.joint_archive,slots*kJointArchive);
+        ws.grow(ws.joint_quotient,k*k);ws.grow(ws.joint_visits,k*k);
+        ws.grow(ws.joint_partner,k);ws.grow(ws.joint_seeds,k*seed_width);ws.grow(ws.joint_stops,k);
         auto* quotient=thrust::raw_pointer_cast(ws.joint_quotient.data());
         auto* visits=thrust::raw_pointer_cast(ws.joint_visits.data());
         auto* partner=thrust::raw_pointer_cast(ws.joint_partner.data());
         auto* seeds=thrust::raw_pointer_cast(ws.joint_seeds.data());
-        auto* events=thrust::raw_pointer_cast(ws.joint_events.data());
         auto* stops=thrust::raw_pointer_cast(ws.joint_stops.data());
         CUDA_CHECK(cudaMemsetAsync(quotient,0,k*k*sizeof(*quotient)));
         CUDA_CHECK(cudaMemsetAsync(visits,0,k*k*sizeof(*visits)));
         joint_quotient<<<std::min(context.vertex_blocks,1024),256>>>(n,labels,cache,quotient);
         CUDA_CHECK(cudaGetLastError());
-        int empty_joint=0;
-        for (int pass=0;pass<options.joint_rounds;++pass) {
+        int empty=0;
+        for (int pass=0;pass<options.exchange_rounds;++pass) {
             joint_match<<<1,128>>>(k,quotient,partner,visits);
             CUDA_CHECK(cudaMemsetAsync(seeds,0xff,k*seed_width*sizeof(*seeds)));
             joint_seeds<<<std::min(context.vertex_blocks,1024),256>>>(n,labels,cache,partner,seeds,seed_width,pass);
-            joint_grow<<<(slots+7)/8,256>>>(slots,seed_width,seeds,partner,offsets,neighbors,weights,vertex_weights,labels,cache,part_weights,context.capacity,joint);
-            CUDA_CHECK(cudaGetLastError());
-            int generated=0;
-            if(options.joint_diagnostics)
-                generated=slots-static_cast<int>(thrust::count_if(detail::scratch_policy(),
-                    ws.joint_moves.begin(),ws.joint_moves.begin()+slots,EmptyJointMove{}));
-            if(options.joint_deduplicate)
-                joint_deduplicate_policies<<<(slots/2+255)/256,256>>>(slots,joint);
-            const auto end=thrust::remove_if(detail::scratch_policy(),ws.joint_moves.begin(),ws.joint_moves.begin()+slots,EmptyJointMove{});
-            const int active=static_cast<int>(end-ws.joint_moves.begin());
-            if(!active) {
-                if(options.joint_diagnostics)
-                    std::cout << "joint_filter n=" << n << " k=" << k << " pass=" << pass
-                              << " generated=" << generated << " after_policy_dedup=0 first_survivors=0 survivors=0 selected_transactions=0 moved_vertices=0 cut_gain=0\n";
-                if(++empty_joint>=2) break;continue;
-            }
-            thrust::sort(detail::scratch_policy(),ws.joint_moves.begin(),end,JointOrder{});
-            int first_survivors=0,survivors=0;
-            if(options.joint_conflict_rounds==1) {
-                thrust::fill(detail::scratch_policy(),ws.incremental_locks.begin(),ws.incremental_locks.begin()+n,INT_MAX);
-                joint_claim<<<(active+255)/256,256>>>(active,joint,locks);
-                joint_resolve<<<(active+255)/256,256>>>(active,joint,locks);
-            } else {
-                auto* selected=thrust::raw_pointer_cast(ws.joint_selected.data());
-                CUDA_CHECK(cudaMemsetAsync(selected,0,active*sizeof(*selected)));
-                // targets is scratch here; joint_mark overwrites every surviving
-                // vertex target before events/apply. No graph labels are changed.
-                CUDA_CHECK(cudaMemsetAsync(targets,0xff,n*sizeof(*targets)));
-                for(int retry=0;retry<options.joint_conflict_rounds;++retry) {
-                    thrust::fill(detail::scratch_policy(),ws.incremental_locks.begin(),ws.incremental_locks.begin()+n,INT_MAX);
-                    joint_retry_claim<<<(active+255)/256,256>>>(active,joint,selected,targets,locks);
-                    joint_retry_resolve<<<(active+255)/256,256>>>(active,joint,locks,selected,targets);
-                    if(options.joint_diagnostics && retry==0)
-                        first_survivors=static_cast<int>(thrust::count(detail::scratch_policy(),
-                            ws.joint_selected.begin(),ws.joint_selected.begin()+active,1));
-                }
-                joint_retry_finish<<<(active+255)/256,256>>>(active,joint,selected);
-            }
-            if(options.joint_diagnostics) {
-                survivors=active-static_cast<int>(thrust::count_if(detail::scratch_policy(),ws.joint_moves.begin(),end,EmptyJointMove{}));
-                if(options.joint_conflict_rounds==1) first_survivors=survivors;
-            }
+            auto* grown=thrust::raw_pointer_cast(ws.joint_moves.data());
+            auto* archive=thrust::raw_pointer_cast(ws.joint_archive.data());
+            joint_grow<<<(slots+7)/8,256>>>(slots,seed_width,seeds,partner,offsets,neighbors,weights,
+                vertex_weights,labels,cache,part_weights,context.capacity,grown,archive);
+            auto archive_end=thrust::remove_if(detail::scratch_policy(),ws.joint_archive.begin(),
+                ws.joint_archive.begin()+slots*kJointArchive,EmptyJointMove{});
+            thrust::sort(detail::scratch_policy(),ws.joint_archive.begin(),archive_end,JointNetOrder{});
+            archive_end=thrust::unique(detail::scratch_policy(),ws.joint_archive.begin(),archive_end,JointSameCanonical{});
+            const int fragments=static_cast<int>(archive_end-ws.joint_archive.begin());
+            // Long feasible growth outputs and complementary short fragments
+            // enter one pool. Empty short archives never discard long outputs.
+            const int pool_size=slots+2*fragments;
+            ws.grow(ws.joint_candidates,pool_size);ws.grow(ws.joint_events,pool_size);
+            auto* moves=thrust::raw_pointer_cast(ws.joint_candidates.data());
+            auto* events=thrust::raw_pointer_cast(ws.joint_events.data());
+            CUDA_CHECK(cudaMemcpyAsync(moves,grown,slots*sizeof(*moves),cudaMemcpyDeviceToDevice));
+            if(fragments) joint_combine<<<(fragments+7)/8,256>>>(fragments,archive,offsets,neighbors,weights,
+                labels,part_weights,context.capacity,slots,moves+slots);
+            const auto end=thrust::remove_if(detail::scratch_policy(),ws.joint_candidates.begin(),
+                ws.joint_candidates.begin()+pool_size,EmptyJointMove{});
+            const int active=static_cast<int>(end-ws.joint_candidates.begin());
+            if(!active) {if(++empty>=2) break;continue;}
+            thrust::sort(detail::scratch_policy(),ws.joint_candidates.begin(),end,JointOrder{});
+            // One conflict resolution and one exact event plan per batch.
             thrust::fill(detail::scratch_policy(),ws.incremental_locks.begin(),ws.incremental_locks.begin()+n,INT_MAX);
-            joint_mark<<<(active+255)/256,256>>>(active,joint,labels,locks,targets);
+            joint_claim<<<(active+255)/256,256>>>(active,moves,locks);
+            joint_resolve<<<(active+255)/256,256>>>(active,moves,locks);
+            thrust::fill(detail::scratch_policy(),ws.incremental_locks.begin(),ws.incremental_locks.begin()+n,INT_MAX);
+            joint_mark<<<(active+255)/256,256>>>(active,moves,labels,locks,targets);
             CUDA_CHECK(cudaMemsetAsync(events,0,active*sizeof(*events)));
-            joint_events<<<(active+7)/8,256>>>(active,joint,locks,targets,labels,offsets,neighbors,weights,events);
-            joint_prefix<<<(k+127)/128,128>>>(active,k,joint,events,part_weights,context.capacity,stops);
+            joint_events<<<(active+7)/8,256>>>(active,moves,locks,targets,labels,offsets,neighbors,weights,events);
+            joint_prefix<<<(k+127)/128,128>>>(active,k,moves,events,part_weights,context.capacity,stops);
             CUDA_CHECK(cudaMemsetAsync(flags,0,n*sizeof(*flags)));
-            joint_accept<<<(active+255)/256,256>>>(active,joint,stops,flags);
+            joint_accept<<<(active+255)/256,256>>>(active,moves,stops,flags);
             CUDA_CHECK(cudaGetLastError());
             const auto count=compact_movers();
-            int transactions=0;
-            if(options.joint_diagnostics)
-                transactions=static_cast<int>(thrust::count_if(detail::scratch_policy(),
-                    thrust::make_counting_iterator(0),thrust::make_counting_iterator(active),
-                    JointAcceptedByPrefix{joint,stops}));
-            const auto before_cut=current_cut;
-            auto log_filter=[&]() {
-                if(options.joint_diagnostics)
-                    std::cout << "joint_filter n=" << n << " k=" << k << " pass=" << pass
-                              << " generated=" << generated << " after_policy_dedup=" << active
-                              << " first_survivors=" << first_survivors << " survivors=" << survivors
-                              << " selected_transactions=" << transactions << " moved_vertices=" << count
-                              << " cut_gain=" << before_cut-current_cut << '\n';
-            };
-            if (!count) { log_filter();if(++empty_joint>=2) break;continue; }
-            empty_joint=0;
+            if(!count) {if(++empty>=2) break;continue;}
+            empty=0;
             apply(count,MovePhase::Group);
             if(maximum()>context.capacity || current_cut>=best_cut)
-                throw std::runtime_error("joint exchange violated cut/capacity");
+                throw std::runtime_error("capacity exchange violated cut/capacity");
             best_cut=current_cut;
-            log_filter();
         }
     }
     // Every committed batch updates the exact affected-edge cut. Strict mode

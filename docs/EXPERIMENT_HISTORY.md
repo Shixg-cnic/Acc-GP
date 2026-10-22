@@ -1,15 +1,36 @@
 # 算法与GPU加速尝试历史
 
+2026-10-19 CPU基线扩展：用户授权51图×k4/8/16/32/64×3次，先Mt-METIS官方默认greedy，再mt-KaHIP官方multitrysocialparallel。保留历史HS数据，独立输出到`results/cpu-default-mtkahip-20261019/`。mt-KaHIP未修改源码，补TBB头文件路径完成Release构建；其逐行flush输出在NFS上很慢，首次小图验证已中断并留档，改用/dev/shm临时标签后fe_rotor的k4/64两方法全部cut核验完成。正式队列顺序运行，记录原生时间和进程墙钟，标签核验后删除。此项为基线测量，不改变Acc-GP算法，不预先宣称greedy更快。
+
+2026-10-19 晚间按用户新指示调整测量：停止本轮Jet重测，复用`data/baselines.csv`中已有Jet结果；将尚未完成的Acc-GP配置切至空闲GPU1，只测51图的k4/8/16/32/64。迁移时保留400条Acc-GP原生记录及已保存的独立核验，原记录GPU UUID不改写；后续仍用冻结binary f35523a9…。旧41图/追加10图控制器已被`archive/experiments/cohort41-social-20261019/ours51_gpu1.py`替代，当前状态以同目录`pipeline-state.json`和`supplement-state.json`为准。Jet来源表已冻结，最终对比标明历史结果复用，不声称是同轮交错测量；逐k汇总保持不变。此项仅改变实验调度与对照来源，不改算法。
+
+2026-10-19 20:40 扩展当前冻结版覆盖：用户要求测齐现有51图的k4/8/16/32/64，追加原41图之外的10图；与Jet配对，固定现有binary，不重新编译。现有41图队列含k128，继续按原身份完成；新10图仅补用户本次指定的五种k。合并表只纳入五种k，九类柱状图所用统计按k分别输出，不跨k平均。当前是已排队的实验，不表示51图已有完整结果；内存分配失败继续保留并报告。
+
+2026-10-19 当前补测状态：按用户要求对原G-kway成功的41图补测当前冻结Acc-GP与Jet的k4/8/16/32/64/128，二进制分别为f35523a9…、ca8fc1f9…。批次在`results/manual/cohort41-20261019`，原始资料在同级archive的`experiments/cohort41-social-20261019/ours-jet`。本次不改算法，不将旧版本成绩当成当前成绩；完成后按实际覆盖汇总。uk-2002 k128当前Acc-GP发生cudaMalloc显存分配错误，k4–64已完成，失败不填时间或速度比。
+
+同日Mt-METIS缺项补跑：官方0.7.2冻结binary、32物理线程、HS、seed0，对kmer_U1a的k32/64/128各再次运行五次，15次均SIGSEGV，没有有效标签；`data/baselines.csv`仍保留缺失，不混入改版、改线程或其他seed的成绩。覆盖和逐次失败记录见`results/cpu-baselines/cohort41-missing-20261019`。此前S_move_vertex的NULL_PID越界诊断仍是已有确认的源码证据，本轮未重新跑调试器。
+
+同日社交候选筛查：沿用原论文阈值G-kway冻结binary5014ba48…，不恢复已撤回的层次存储修复。首批13个候选中wiki-Talk、com-DBLP、dblp-2010、hollywood-2009、ego-Facebook及商品共同购买图amazon-2008均通过k2–64；超载按用户要求保留，全部接受输出cut独立复算一致。其余候选的运行错误/内存分配失败和跳过均保留。输入来源、全部结果和小图规模限制见`data/SOCIAL_CANDIDATES.md`；另准备YouTube/Gowalla更大候选，尚未计入通过清单。没有按Acc-GP加速效果筛图，主选集未改变。
+
 更新：2026-10-17。本文是维护中的统一历史入口，分为两部分；成功、失败、撤回和未验证都保留。状态“保留”表示进入当前源码，“历史采用”表示曾进入旧版本，“否决/撤回”表示不在当前主线，“待验证”不代表已实现或有成绩。每项倍数只对应注明的版本、输入和对照，整版结果不等于单项贡献。
 
 当前主线为regret（2026-10-17按用户决定）；旧粗化分支已归档删除。该决定不改变此前九图筛选偏弱的结论，也不代表新颖性和速度目标已经达成。历史材料和失败结果继续保留，当前代码与运行方式见ALGORITHM/README。
 
 ## 一、划分质量与算法机制的创新/修改历史
 
+2026-10-19 源码整理：按用户要求删除主仓库测试目录、独立粗化检查入口及6个过期实验脚本；13个私有实现/辅助头文件按粗化、细化与数据结构职责重排。32份生产C++/CUDA文件在还原include路径后逐字节一致，保留编译单元、kernel、默认参数与计时。当前算法和贡献文档重写，历史文档原文、测试和此前未提交差异保存在`../../Acc-GP-archive/maintenance/source-cleanup-20261019/`。本次不新增GPU性能结果；当前CPU队列所依赖的文件与二进制未改。
+
 本部分包括影响合并映射、候选、迁移、容量或搜索预算的修改；通用机制与Jet等继承机制不当作已证明原创。
 
 | 日期/版本 | 尝试与动机 | 结果、局限及决定 | 状态/证据 |
 | --- | --- | --- | --- |
+| 10-17，容量互补单主线整理 | 按用户“多数配置整体收益即可保留”标准，统一LP＋容量互补交换；删除legacy/独立joint后端、去重/重试开关和双计划保护 | 11项CTest/完整uncoarsen memcheck通过；九图k128三次81份：对legacy速度1.03978×、cut比1.00069，8/9更快；对Jet1.39697×、cut比1.04912。另四图两k48份对旧双计划速度0.99575×、cut比0.99174，5/8更快/5/8切边更低。全部独立核验，允许局部回退，容量/实际正收益保持 | 保留唯一研究主线；[九类结果](../results/manual/capacity-exchange-final-20261017/comparison.csv)、[单/双计划](../results/manual/capacity-exchange-single-plan-20261017/comparison.csv)。旧源码/测试/binary冻结在capacity-exchange-mainline-20261017 |
+| 10-17，容量互补预算版27e8d83f | 四点/四状态档案保留不可行正收益片段，精确互补组合与原完整计划逐匹配对择优 | 33个同LP检查点132份核验：单批20好13同0差，两批21好10同2差。四图两k三重复48份开关消融，对旧joint0.98127310×、cut比0.99625976（质量约好0.374%，耗时约增1.91%）。局部单批保护不能推广为多批质量保证 | 保留研究开关、默认0；[同LP](../results/manual/joint-complement-fixed-final-20261017/fixed_lp.csv)、[单机制原生](../results/manual/joint-complement-ablation-20261017/comparison.csv) |
+| 10-17，容量互补预算版九类 | 九类各一图k128×3次×候选/legacy/Jet，81份全部cut/严格容量核验 | 对legacy速度1.03005421×、cut均比1.00288479；对Jet1.37067119×、cut均比1.04513747。stokes/nlpkkt200/kmer_V2a仅0.90054/1.02497/1.13753×Jet；不可把整版对legacy差异归给本次complement。社会网络只测soc-Pokec，不是八图或51图全集 | legacy默认保持，未达逐配置1.15×；[逐配置及切边比](../results/manual/joint-complement-final-20261017/comparison.csv) |
+| 10-17，容量互补前缀首版 | 原轨迹保存至多8个正收益状态，含单独不可行前缀；净重区间4代表配对、真实边修正；原/新完整计划逐匹配对择优 | 33个共同LP状态132份核验：单批20好13同0差，两批24好9同0差。四图k8/128×3次×两方法48份全核验；对旧joint0.97304×、cut均比1.00016，af_shell10 k128切边+1.72%，局部收益未稳定传到端到端 | 不提升默认；joint-complement-fixed-20261017、joint-complement-screen-20261017 |
+| 10-17，四点档案预算回归 | 保留原八点候选，限制额外档案为至多四点片段，以降低扩池/排序/精确事件成本 | 初版空档案误跳过原六/八点可行候选，三角形测试cut27未改善而应为3；确认测试退出前误启计时，已中止，5份输出虽独立核验通过但不作性能结论。修复为空档案直接执行实际原计划，测试断言保持 | 失败源码/日志和中止批次joint-complement-bounded-20261017保留；修复后12项CTest、组memcheck、joint路径initcheck通过，重测见上两行 |
+
+| 10-17，bbf6c81后复审与选集调整 | 用户排除products，社会网络保留原指定八图；核对路网零输出与af_shell10提交退步，停止单独调去重/冲突轮数 | road_usa k8的18批中10批零输出，32记录仅10事务且全部提交，重试无新增；af_shell10 k128保留真实收益17701→17667的反例。旧结果不改写 | 已更新51名称选集及入口；下一步为同LP生成诊断、原提交计划保护、按证据决定净重量备选组合；算法尚未实现，详见CONTINUATION |
 | 10-17，筛选真实效果与同LP检查 | 9图×两k×5次×原候选/去重/冲突3轮/Jet，共360份；另4图两k的55个同LP检查点、165份局部结果 | 全部cut/容量核验。去重速度0.99983472×、cut比0.99959135；冲突0.99606982×、cut比1.00132366。同LP去重标签全相同，冲突15好34同6差；额外候选可能破坏原最佳前缀 | 未达到优化目标，两个开关均不推广；[逐配置](../results/manual/joint-filter-effects-20261017/comparison.csv)、[固定LP](../results/manual/joint-filter-effects-20261017/fixed_lp.csv) |
 
 | 10-17，外部审查后的筛选实验 | 同种子双策略完全相同移动去重；成功事务固定、失败事务最多4轮重新竞争；生成/幸存/提交事务与顶点分开计数 | 新功能显式启用，默认保持原行为。H/X/Y冲突反例和收益10对可行子集18的前缀局限进入测试；当时仅正确性验证，随后补测见上行 | 3项定向CTest通过，新筛选核memcheck/racecheck通过；不推广默认，不称已修复路网质量回退 |
@@ -46,10 +67,35 @@
 
 ## 二、GPU加速与执行优化尝试历史
 
+2026-10-20 CPU基线超线程单图试验：按用户要求，对wb-edu、k=8使用同一个官方Mt-METIS 0.7.2冻结binary（404620b3…）、默认greedy、seed0和3%容量，交错运行32/64线程各三次。32线程绑定CPU0–31，64线程绑定CPU0–63，均使用NUMA interleave=0,1、OMP_PROC_BIND=close、OMP_PLACES=cores。原生时间分别为32线程15.344/20.313/12.910秒、64线程18.997/18.078/17.087秒；中位数为15.344/18.078秒，64线程本轮耗时增加17.8%。六次切边独立复算一致且容量合格。运行窗口存在其他用户后台CUDA编译，32线程本轮明显高于历史4.544秒且有波动，因此仅记录为受干扰的探索性试验，不能认定为纯SMT收益，也不替换正式基线。逐次/汇总CSV在`results/mtmetis-smt-wb-edu-k8-20261020/`，命令、日志、核验与进程快照在同级archive的同名experiments目录；临时标签已删除。未修改生产代码或CPU运行脚本。
+
 本部分优先记录保持给定算法含义的布局、调度、压缩、缓存与资源管理。GPU调度可改变原子平局到达顺序，因此cut可能波动；精确CSR、容量和独立核验仍必须成立。
 
 | 日期/版本 | 尝试 | 实测或验证、失败原因/限制 | 决定/证据 |
 | --- | --- | --- | --- |
+| 10-22，交换收益事件warp归约 | 一个warp处理一个事务；本事务的边贡献由lane局部累加、五步shuffle归约后至多一次原子写回，远端事件保持原路径；无新开关 | CPU oracle seed=20261022，8个定向案例＋2500个随机图／候选池，33267个前缀的旧事件／新事件／独立cut三方一致。覆盖空／失败事务、跨匹配对、自环／零权、抵消、2050度长行及64位事件。模拟逐边处理的原子调用1006580→179146，仅为合成案例的操作计数；未CUDA编译或GPU测试 | 已实现、待GPU验证。候选、容量、冲突与前缀规则不变。实现见[exchange.cuh](../src/refinement/exchange.cuh) `joint_events`；操作量和归约语义见[技术拆解§8.8.5](GPU_ARCHITECTURE_ANALYSIS.md)。本次不引用历史速度作为提速结果 |
+| 10-18，arena最终profile | 同卡before/arena各三弱图，Nsight Systems，输出逐份CPU核验 | native分配API 77.62→34.46、70.35→30.20、60.79→36.14ms；调用数1520→92、1480→80、2212→166。trace显存峰值stokes近似不变，nlpkkt200/kmer增加约1.1GiB，包含池保留量但不含上下文/驱动 | 6份全核验并清理标签；仅诊断，不代替原生速度。[表](../results/manual/weak3-gpu-profile-20261017/arena-memory.csv) |
+| 10-18，统一arena | 普通CUDA底层块＋best-fit区间复用/合并，取代异步池；没有新增开关；仍含全部分配/释放计时 | 三弱图k128×5×3方法45份全核验；相对4ba62d9e速度1.17199/1.10895/1.11691，几何平均1.13227×，平均cut比1.000415；Jet1.17435×。stokes仍仅Jet1.14546，另外两图约1.19×，未全部达到1.2× | 保留f35523a9，11CTest及memcheck/synccheck通过；[重点表](../results/manual/weak3-arena-20261017/comparison.csv)。完整17图171份全核验，16快1慢，对修改前1.11149×、cut均比1.00210；三类11图1.08950×，无新增OOM。[覆盖表](../results/manual/weak3-arena-all-20261018/comparison.csv) |
+| 10-17，clean-kernels | 全量重编译确认恢复原medium-row CSR；warp级cut累加、dirty原子预读、warp CDF、充分位宽下bounds原子加 | 三弱图k128×5×3方法45份全核验；对4ba62d9e速度stokes1.00128、nlpkkt2000.98431、kmer_V2a1.05184；未达到大幅改善 | 有效隔离版本f69bc05e；[表](../results/manual/weak3-clean-final-20261017/comparison.csv) |
+| 10-17，allocation | 大于等于128MiB数组普通CUDA分配，小数组仍异步池 | 三图45份全核验；对4ba62d9e速度1.01494/1.02989/1.04949、cut比1.00698/1.00018/1.00010；释放变快但重复分配抵消部分收益 | 中间候选9c7759f8；[表](../results/manual/weak3-allocation-20261017/comparison.csv) |
+| 10-17，release微测试 | 相同14GiB分配、写入、释放；普通分配与异步池；另比较trim/destroy/threshold释放 | 四轮中位数普通21.13ms、异步79.63ms；free前后显存一致。仅换池释放API均约44–50ms，无效 | 仅微测试，不等于数据集收益；[表](../results/manual/weak3-gpu-profile-20261017/pool-vs-direct.csv) |
+| 10-17，warp-final混合对象构建撤回 | warp切边累计、标脏加载、并行CDF与有界粗化求和 | 45份冻结二进制输出全部cut/容量核验；但恢复coarsen_sclp旧时间戳后漏编，仍链接已撤回的短行寄存器聚合。源码快照与对象不一致，三图原生数字不得作为当前源码成绩。同步检查的块屏障版本也未进入正式候选，改为warp累计及warp CDF后CTest/memcheck/synccheck均通过 | 撤回版本归因，保留[原始表](../results/manual/weak3-warp-final-20261017/comparison.csv)及IDENTITY.csv；不叠加收益。后续clean-first重建并重新冻结/测量 |
+| 10-17，粗化warp内聚合试验 | 9–32项邻接行用match/reduce代替共享哈希；同时测试有界簇重量atomicAdd | 三图k128各5次的冻结二进制负结果为速度0.97915×、cut比0.99759。但随后发现copy2恢复旧时间戳导致增量构建遗留retry细化对象，源码快照不能完整代表已链接二进制；不作为粗化单项归因证据。独立映射/容量检查仍通过 | 撤回；原始30份cut/容量核验有效，性能归因撤回；最终候选必须clean-first全量重建。[30份核验结果](../results/manual/weak3-coarse-20261017/comparison.csv)；coarse-source归档 |
+| 10-17，三张弱图统一缩小线程组/寄存器亲和力 | Sparse/OnDemand提案宽8改1、更新宽32改8；短行4项排序、17–64度至多4键寄存器聚合 | 三图k128各5次，对当前4ba基线速度0.98428×、cut比0.99955；stokes/nlpkkt200/kmer分别0.97451/1.00551/0.97315×。11项CTest与完整uncoarsen memcheck通过，但总时间未改善。单次profile也显示kmer提案/更新变慢，不能凭线程利用率猜测提速 | 撤回全部生产改动，无开关；[45份全核验结果](../results/manual/weak3-affinity-20261017/comparison.csv)；冻结在weak3-gpu-20261017/affinity-source |
+| 10-17，容量预约重试枚举 | 重试枚举非零亲和力，必要时扫描零亲和力最大余量；保留整点票据协议 | 三图k128各5次，对4ba速度0.99410×、cut比1.00215；分别1.02839/1.00315/0.95230×。345408次初始选择及345408次重试选择对CPU穷举通过，11项CTest通过；Biology明显退步，静态复杂度下降未转成总体收益 | 撤回；[30份全核验结果](../results/manual/weak3-retry-20261017/comparison.csv)；weak3-gpu-20261017/retry-source保留实现与oracle |
+| 10-17，生产执行路径收敛 | 移除Sparse增量及相关字段/分支，固定采用已验证的修复查询枚举/CDF和cut布局资格 | Sparse增量重建节省被维护开销抵消，旧实验保留；不保留CLI切换，库oracle仍核对查询/布局。单计划减少重复排序/事件/全N标记，但四图两k对双计划速度仅0.99575×，未实现整体提速；不能把少执行步骤当成速度证据 | 生产移出失败路径，归档完整旧源码；不将删除代码量当作实测提速 |
+| 10-17，Sparse增量2–8键预算版 | 限制查键成本，一键或超过8键行直接重建，其余精确原子增量/缺键重建 | 三图k128×3次×两方法18份全核验；stokes/nlpkkt200/kmer_V2a速度1.06640/0.98951/1.01879×，cut比1.00239/1.00316/1.00343。两快一慢，kmer反粗化中位反而增加约22.2ms，不能将总时间微降归为维护收益 | 保留开关、默认0；[独立消融](../results/manual/sparse-delta-bounded-20261017/comparison.csv) |
+| 10-17，Sparse预算版Nsight | stokes k128同一27e8d83f开/关增量，另2份cut/容量核验后删除标签 | warp重建45.014→21.065ms，短行构建/压缩1.579→10.396ms，cache/cut更新13.646→29.118ms；合计60.240→60.579ms，新增维护代价抵消重建节省。repair预约10.161→14.925ms、98→122调用；onesweep约56.5ms、trim API约45ms | 单次轨迹诊断，不是固定输入或原生计时；[GPU/API分别列示](../results/manual/sparse-delta-profile-20261017/profile.csv)。需减少查键/原子/压缩代价后再验收 |
+| 10-17，Sparse已有键增量首版 | 冻结Sparse键、原子更新现有源/目标槽；缺键行重建，其他行压缩零值，保持精确候选集合 | stokes/nlpkkt200/kmer_V2a k128×5次×两方法30份全核验；速度1.00195/0.98118/0.95474×，cut比0.99716/0.99751/0.99358，未见整体提速。键查询与原子更新成本抵消重建节省 | 默认关闭；sparse-delta-screen-20261017。后续只尝试2–8键行，其余直接重建；该预算独立量化见上行，不能沿用首版成绩 |
+
+| 10-17，最终版Nsight核对 | c5c69063同二进制关闭/开启两优化，stokes k128，原生计时之外单独采集 | proposals68.508→16.374ms，warp LP35.886→12.330ms；构建/重建15.870→48.088ms（39→85次），显示Sparse维护新代价；全阶段onesweep仍约53.1ms，trim API44.6→45.1ms。调用数/轨迹有差异，不能当作固定输入单核消融，API与GPU时间不可相加；两份输出独立核验后删除标签 | 定位下一步重建与排序；gpu-execution-profile-20261017。未改动态接收重试、粗化和清理计时范围 |
+
+| 10-17，查询＋布局最终c5c69063 | 查询内部点证明、Sparse枚举、余量CDF；Dense边界保留原顺序扫描；cut上界扩展Sparse资格 | 九类k128×5次×3方法，135份全核验；对同binary两项关闭几何平均1.06756×、cut均比0.99824，8快1慢；对Jet1.39811×、cut均比1.04417。stokes/nlpkkt200/kmer_V2a仍不足Jet1.15×，af_shell10对reference0.99041×。12项CTest通过，345408次目标oracle一致，selector/完整细化memcheck0错误 | 保留本轮执行优化，速度目标未全面达成；gpu-execution-final-20261017。k8/64三图54份全核验，对reference1.01284×、cut均比0.99946，3快3慢、最坏回退0.69%；表在gpu-execution-k8k64-20261017，不将前置批次收益相乘 |
+
+| 10-17，修复查询首版初筛 | 内部点零外部亲和力证明、Sparse非零枚举，原目标排序和完整容量规则 | stokes/nlpkkt200/kmer_V2a的k128，5重复、同二进制开关对照，30份全核验；速度1.08597/1.05800/1.07315×，cut比1.00002/1.00305/0.99671。此时尚无CDF及cut布局资格 | 保留方向；repair-enumeration-screen-20261017 |
+| 10-17，修复CDF版本 | 冻结接收余量CDF，只在全部非空接收者可容纳完整顶点时二分；其余原完整余量哈希 | 2b093efb二进制，九图k128×5次×3方法，135份全核验；对同binary原查询几何平均1.04014×，cut算术平均0.99599；soc-Pokec为0.9504×，三个弱配置仍低于Jet1.15×。不是最终版成绩 | 保留并继续优化；repair-enumeration-final-20261017。原版/该版Nsight查询核stokes约68→29ms、nlpkkt200约59→25ms、kmer_V2a约52→26ms；调用数不同且有剖析扰动，不作为原生加速比 |
+| 10-17，cut上界Sparse初筛 | sum(q_v)<=N+2*cut作为资格启发式，保留内存/长行保护；只改布局选择 | stokes/nlpkkt200/soc-Pokec的k128×3次×2方法，18份全核验；同binary查询优化已开启，切换布局资格，速度1.07472/1.05983/0.97205×，cut比0.99884/1.00209/1.00131。soc-Pokec细化中位基本相同，端到端未提速 | 继续最终九类复测，不能把两批倍数相乘；affinity-cut-bound-screen-20261017 |
+
 | 10-17，移除big及双宽模板 | 构建仅standard；图/层次/算法接口去掉Types模板，亲和力视图去掉偏移/边权双宽分支；脚本跳过超范围图 | 单类型改动先通过10项CTest；uint64/int64累计cut、负载和gain、按证据选择的缓存宽度仍保留。旧big生成物从build移除，历史实验核验仍可读取归档big哈希 | 保留；未把减少构建工作量称为算法加速 |
 | 10-17，去重/冲突筛选端到端验证 | 固定LP去重将20006个非空候选压至10979，最终提交及标签不变；重试增加kernel与全N清空 | 九类5重复未获得总体提速，k128去重0.98762×、冲突0.98219×。nlpkkt200 k8总时间中位下降约11%，但细化中位未降低，不能归功于冲突机制。原生两图组CPU核隔离但共享主机内存/IO，微小差异不作强因果解释 | 保留实验开关，不作为成功加速贡献；日志/版本在joint-filter-effects-20261017 |
 
@@ -87,7 +133,8 @@
 | 10-16，计时边界审查 | 对比Jet调用者输入所有权及内部清理 | 保留当前完整native边界，不移走free/trim达标；普通free约3.5ms不能解释45ms池清理 | 保留计时；归档TIMING_SCOPE.md |
 | 10-16，仓库与结果整理 | 图工具迁出；标签核验后删除；表格与原始材料分开；合并历史文档 | 删除13923个part，逻辑390219575124字节；补70份逐次CSV。工具改为先保存核验再删标签，保留失败记录；不改算法及性能计时 | 已完成整理；6项主机CTest/4项存储回归通过，3078条旧记录审计通过；[结构](STRUCTURE.md)、[结果索引](../results/INDEX.md) |
 
-旧实验中其他screen/build目录保留在归档，完整目录索引列于归档README。若单项没有有效隔离结果，状态记为“原型/未独立归因”，不以目录存在推断成功。CPU Mt-METIS/KaMinPar全集1950次已完成，仅作对照不恢复重跑；其七列表在[CPU结果](../results/cpu-baselines-20261014/full-suite/REPORT.md)。
+
+旧实验中其他screen/build目录保留在归档，完整目录索引列于归档README。若单项没有有效隔离结果，状态记为“原型/未独立归因”，不以目录存在推断成功。CPU Mt-METIS/KaMinPar旧全集1950次均有运行记录（包含崩溃及超载，不等于1950份有效输出）；2026-10-18按用户要求仅补跑当前选集中的未核验缺项，原始七列表在[CPU结果](../results/cpu-baselines-20261014/full-suite/REPORT.md)。
 
 后续每项记录至少包含：日期、阶段、机制/实现变化、来源、版本、对照和范围、时间/cut/容量结果、保留或拒绝原因。失败和负结果继续写在对应部分；当前算法文档只描述最终保留状态。
 
@@ -130,3 +177,95 @@
 先做row512与旧版两图子阶段剖析，16份输出全核验。再试8/32线程自适应搬运，16份剖析及20份五重复原生输出全核验；完整耗时无可靠收益，已撤回。所有正负记录保留于experiments/row512-20261017、row512-width-20261017、row512-width-screen-20261017，正式本轮筛选位于row512-final-20261017。逐配置/九类/逐次CSV只存results/manual下同名目录。早期memcheck因/tmp满未启动，设置TMPDIR到archive/build-tmp后最终检查零错误；不把环境失败当内核测试通过。
 
 测量standard=f316f4c7a69fdd57d589c26e3182c3580f5b5277c2517c41f66004f17eb10a2c，reference=4cb8bb4d7e74630dab7c5ef466674f358e7b6b584addecf7475d85d81bfc98f7。撤回宽度候选后重编译standard=dd536dfc01a68341ca3956c2a0d4143a105fa25615ab13866f0d1efe8940b63e，big=5f8248d10d17e02fbbdcc20d87edc99984da183cface86a49b7d7f7e3a063308；二进制哈希不同，31个生产源码文件逐字相同，哈希与重编译说明保存于实验目录。性能数字明确对应冻结f316f4c7，不混称二进制相同。最终13CTest及standard memcheck在重编译库上完成。所有后台实验均已结束。
+
+## 2026-10-18：CPU对照补缺与k64/128入口（实验基础设施）
+
+不修改GPU算法或CPU基线算法。官方Mt-METIS 0.7.2采用HS、KaMinPar 3.7.3采用default，固定seed0、32物理核（0–31）、NUMA节点0/1交错，沿用旧版原生计时边界。当前51图k2/4/8/16/32的1530槽位中，1504份原输出已核验；其余26份均为Mt-METIS退出-11，KaMinPar没有未核验缺项。复用既有核验记录，包括超载结果；只重试未取得核验输出的槽位，不选最快或最低cut。导入校验程序/动态库哈希、物理核与NUMA、种子、输入标识和容量，逐行保留来源；旧oracle身份保留于来源元数据，新运行使用当前冻结oracle。
+
+新增根目录run_cpu_baselines.sh，默认51图×k64/128×三重复×两方法，共612次，留给用户启动；相同命令续跑，仅重试未核验失败。现有runner增加相容结果导入、完整尝试历史、coverage.csv和attempts.csv，结果表仍按方法保存七列及逐次记录；核验后删除标签，原始材料保留仓库外。
+
+测试：三项主机测试通过（含真实SIGINT终止子进程检查），使用256点环图、模拟CPU程序及真实C++ CSR oracle，覆盖k64/128、失败重试、身份/输入不匹配拒绝、超载不重跑、report-only配置恢复及标签删除。真实fe_rotor上两方法×k64/128各一次共4份输出均完成独立核验，KaMinPar两份容量合格；Mt-METIS实际最大负载比分别1.045283436/1.094752904，均超出1.03。该四份仅验证高k入口，不代表612次全集完成。report-only重分析及shell语法检查通过；未重新构建或运行GPU测试。
+
+崩溃诊断与正式计时分离：kmer_U1a k8、相同Mt-METIS HS/T32参数在gdb中复现SIGSEGV，调用栈为S_move_vertex()←S_par_kwayrefine_HS()；仅定位函数，未确定根因或修补上游实现。诊断不计入原生统计。日志及工作流测试在../Acc-GP-archive/experiments/cpu-gap-audit-20261018/，补跑原始记录在cpu-baselines-20261018/completed-k2-k32/，高k入口核验在cpu-baselines-20261018/k64-k128-smoke/。
+
+最终补跑完成两轮，共43次新增原生尝试：首轮26次补出9份，第二轮仅重试剩余17次、再补出4份。26个原缺项最终13份取得核验输出（3份容量合格、10份超载），13份仍退出-11。当前1530槽位中1517份输出已核验：KaMinPar 765/765均容量合格；Mt-METIS 752/765取得输出，其中452份合格、300份超载。每槽只保留首个核验输出，先前失败43份单独存档（含原始失败和本轮被后续尝试替换的失败），attempts.csv共1573行；不是1530次全量新测。
+
+剩余Mt-METIS缺项（repeat按1起算）：com-LiveJournal k32/r2；soc-LiveJournal1 k16/r1；kmer_V2a k8/r1,3及k32/r1,2；kmer_U1a k8/r2,3、k16/r1,3及k32/r1,2,3。保留官方原参数，不替换为其他细化器/线程数凑齐。覆盖表510行，两个方法中位数表各255行，只有三个重复均核验后才填中位数。全部1530记录检查唯一键、核验负载及整数容量，两个新实验目录无残留.part。最终审计见archive的cpu-gap-audit-20261018/final-audit.json。原生cut与独立复算不一致的143份仍逐条保留（包括历史记录），表格使用独立复算值，不以原生日志替代核验。
+
+## 2026-10-18：用户要求再次重跑Mt-METIS缺项
+
+沿用官方Mt-METIS 0.7.2 HS、32物理核、NUMA0/1、seed0及冻结程序，未改算法、线程或种子。用户明确忽略容量超限进行cut比较，因此仅重试未取得核验输出的43个槽位，已有超载结果保留。k64/128重试30次补出14份（1容量合格/13超载），16份仍退出-11；旧k2–32重试13次补出5份（3容量合格/2超载），8份仍退出-11。新核验输出19份，剩余失败24份集中于soc-Pokec、com-LiveJournal、soc-LiveJournal1及两个kmer图。kmer_U1a的k64/128仍全部失败，不能补造cut。
+
+前后逐行检查所有既有核验记录未改，1071份KaMinPar全部合格且未重跑，程序/元数据身份一致；新增失败历史完整保存。19份输出独立复算cut/容量后删除标签，其中4份原生cut与独立复算不一致，表格继续采用独立复算值。无需重编译/修改代码，没有新增GPU试验。43次新尝试及逐配置结果在results/cpu-retry-20261018/{attempts,summary}.csv；archive/experiments/cpu-retry-20261018保存前后快照、日志和final-audit.json。
+
+当前17图k128的CPU切边比较同步刷新。按用户忽略超载的口径，对KaMinPar仍13/17更低、逐图比值均值0.966136；对Mt-METIS仍11/16更低、均值从0.948085变为0.947617。soc-Pokec现在2次、kmer_V2a仍2次、kron20补齐3次，其余有输出图3次；kmer_U1a无输出不计。每图按可用核验重复取中位数，不能将缺失样本声称为完整三重复。原严格容量表也刷新，重跑前比较快照归档。
+
+## 2026-10-18：Mt-METIS崩溃原因定位（诊断，不计性能）
+
+针对用户询问原因，读取既有kmer_U1a k8栈，并用相同官方HS/T32/seed0 binary在kmer_U1a k128上进行一次gdb复现；未修改源码或构建。确认崩溃位于S_move_vertex的mynbrs[k].ed读取（src/kwayrefine.c:329），二进制偏移0x49a6d，与先前k8故障一致。搜索目标分区失败时k=NULL_PID（uint32最大值4294967295），内部权重id=0使追加条目分支跳过，随后仍无条件访问mynbrs[k]。现场id=0、ed=2、nnbrs=2，邻接表基址0x7ffc2e0db4b0，故障读取地址0x800c2e0db4a0，差0xffffffff0=4294967295×16字节，直接证实无效下标越界。调用点对应HS待处理跨线程移动请求路径。
+
+源码字节与官方0.7.2发布tar包一致，binary仍404620b3；这是已复现输入下的上游边界处理缺陷。尚未对每一个失败配置复现，也未证明触发状态的完整并发因果链，不能笼统把所有崩溃归因于数据竞争。此诊断无输出标签，不进入CPU正式时间/cut汇总；日志、命令、汇编和diagnosis.json位于archive/experiments/cpu-crash-diagnosis-20261018。官方程序未修补；当前正式失败记录保留。
+
+## 2026-10-18：最低CPU baseline覆盖的追加重试
+
+用户要求对已确定的崩溃图多跑几次，至少每个图/k得到一份baseline，并明确数据需用于论文加速比。检查当前51图×7k发现，KaMinPar357配置都有输出；Mt-METIS354配置有输出，仅kmer_U1a的k32/64/128为空。最初检测到其他用户CUDA编译，等待期间误将工作转为quality-only，跑出2次SIGSEGV并中断第3次，零成功；用户纠正后停止，EXCLUDED.json明确排除，正式记录未改。用户要求等待通知，控制器停止；收到恢复通知后才重新启动。
+
+12:41恢复前无编译进程，3秒CPU总忙采样2.4478%。保持原官方HS/T32/seed0/绑定CPU0–31及NUMA0/1，每配置最多5次，首个核验输出即可停止。实际15次全部退出-11，三个配置仍无输出，不能把失败墙钟写成划分耗时。119次外部CPU监控样本未检测到编译重叠，但有rsyslogd、firefox及MainThread短暂负载，未声称整机物理独占；由于全部失败，本轮没有可用性能数字。旧runs/metadata/attempt-history与开始前快照逐字节一致，原CPU切边比较未改变。
+
+`results/cpu-minimum-coverage-20261018/minimum-coverage.csv`逐图/k/方法记录最低覆盖和已有核验重复数，含超载结果且标出容量合格次数；`native-retries.csv`记录本轮15次失败，全部usable_for_speedup=False。完整控制器、二进制身份、输入哈希、失败日志、外部CPU监控及final-audit.json保存在archive/experiments/cpu-minimum-coverage-20261018；无残留.part。没有改变GPU或Mt-METIS源码/算法，没有通过改变线程数或seed填补正式表。反复重跑未消除已定位的越界缺陷，最低覆盖目标仍缺这三个配置。
+
+
+### 2026-10-18：G-kway公开代码初筛（用户要求停止）
+
+保留作者20k阈值和原容量规则，在5090/CUDA13上仅加计时与设备属性API兼容。预装ModernGPU含额外扫描改动的初测整批撤回；恢复作者锁定子模块后重测。计划九图×k8/32/128×三方法×三重复，用户叫停时仅记录95/243槽位（含失败和明确跳过），不是完整九类对比。停止自有控制器及其子进程，已核验输出和原始错误保留，临时标签删除。k128在小图Compute Sanitizer中确认update_vertex_info共享数组越界；soc-Pokec的k8/32报非法访问，尚未定位根因。不修复后冒充原版，也不把崩溃时间计作速度。表格见results/manual/gkway-current-20261018及STATUS.csv；源码/依赖/补丁/诊断/STOPPED.json在同级archive对应目录。
+
+
+### 2026-10-18：G-kway论文阈值对照完成
+
+质量/算法机制：按用户要求将baseline停止阈值从20k恢复为原图N/(20log2k)，无额外上限；不改其容量、METIS调用或细化。四图(grid、wb-edu、soc-Pokec、stokes)×k8/32×新旧G-kway/Acc-GP/Jet×三重复共96次，84份输出独立cut核验一致；12次失败全部为soc-Pokec的新旧G-kway非法内存访问，调整阈值没有消除这一故障。其余三图六配置的新阈值G-kway均三次有输出。超载按用户要求保留比较，不作为运行失败；k4/16/64未测，k128因已确认共享数组越界不测。不能称为全图集可运行。
+
+GPU执行/计时：RTX5090 GPU0，沿用冻结f35523a9 Acc-GP与ca8fc1f9 Jet，作者锁定ModernGPU仅CUDA13设备属性API兼容；新旧G-kway计时同步和清理边界相同。每图方法预热后交错三次，检查外部GPU计算进程重叠。原生计时不含输入读取与输出核验；G-kway初始分配仍在原计时外，清理按额外区间加回，保留原始计时边界限制。未修改Acc-GP算法，也未调优G-kway。表格见results/manual/gkway-paper-threshold-20261018/{runs,comparison,coverage}.csv，源码/二进制/补丁/日志/核验及final-audit.json见同级archive对应目录。所有临时划分标签已删除。
+
+
+### 2026-10-18：G-kway全选集可运行性排查启动
+
+按用户要求，data/README.md删除重复次数、齐全次数和表格括号次数，保留原最终cut/时间、缺失配置及计时身份，原始CSV未改。新增run_gkway.sh与驱动，使用已验证的论文阈值冻结程序；不改任何划分算法。51图×k2/4/8/16/32/64，每配置一次，有效输出独立核验；允许超载，非法访问/超时继续其他配置，OOM后排除同图余下配置。预检306项输入通过，两个无GPU工作流测试通过；全量已启动，未完成前不能称所有配置可运行。公共表在results/gkway-paper，原始证据在同级archive/experiments/gkway-paper。
+
+
+2026-10-18 G-kway全选集排查已完成：51图×k2/4/8/16/32/64共306配置，247份有效输出（133容量合格、114超载），59次运行错误；无超时、OOM或未处理项。41图六k全部成功，ppa只有k2成功，9图六k全失败。失败中54次报GPU非法访问、3次报CUDA invalid argument、2次仅留下usage日志；具体根因未单独诊断，不能视为同一问题。所有有效输出日志cut与独立核验一致，标签均删除，final-audit.json已保存，控制器/划分进程已退出。最终表在results/gkway-paper，原始证据在同级archive/experiments/gkway-paper。
+
+
+### 2026-10-18：G-kway失败根因诊断（非性能测量）
+
+已定位粗化各层共享边存储预分配不足：graph_partitioner.hpp使用MAX_COARSEN_LEVEL=6、COARSEN_RATE=0.6，固定分配约2.38336倍原图邻接项，真实图粗化后的边数下降不满足这一假设。外层越界预警仅输出文字，没有扩容或中止，最终construct_coarsen_graph写出数组。未改变任何生产算法/二进制；诊断副本仅加-g/-lineinfo，soc-Pokec k8经Compute Sanitizer确认coarsen.hpp:242全局写越界，3074条错误。其原图/前两层边项合计约114.8M，预分配106.3M。
+
+另在诊断副本中加入“已算出实际粗边数后、写出之前”的精确边界检查。9张全失败图各取k2，以及ppa k4/k32，共11配置全部在此处触发容量越界（具体数字见results/gkway-paper/diagnosis.csv）。这是代表配置的定位，不声称对59个失败逐一运行sanitizer。ppa k4的gdb异常落在metis_partition.hpp:19，即拷贝越界的粗图邻接区；ppa k32也在写入前边界检查中被拦截，说明其不同报错前已发生相同容量缺陷。更深层错误不能仅按异常文字分类。
+
+这些诊断不进入划分速度/切边统计；原306配置结果不修改。诊断源码、guard补丁、编译命令、sanitizer/gdb日志及summary.json在同级archive/experiments/gkway-failure-diagnosis-20261018。修复方向为按实际层次容量扩容或分层分配，并进行完整边界检查；k128的12000共享int不足是另一个独立缺陷。尚未实施生产修复或重测。
+
+
+2026-10-18阈值因果核对：用户询问是否修改粗化停止阈值导致社交图失败。使用保留的原20k冻结二进制(gkway_old)对enwiki-2021、com-Orkut、soc-Pokec、citation、com-LiveJournal、soc-LiveJournal1、ljournal-2008各跑k2一次，7/7全部退出-6，全部出现global_edge_offset超出容量提示及GPU illegal memory access。与论文阈值k2失败一致，说明在当前5090/CUDA13环境这些故障并非改阈值后才出现。现有soc-Pokec k8/32三重复对照亦新旧均失败。源仓库git diff仅阈值、cmath及说明；实测副本额外含同步/清理计时，ModernGPU锁定作者版本且只改CUDA13设备属性API。诊断guard/-g/-lineinfo仅在独立副本，未进入正式baseline。阈值会改变层数/质量/时间，但固定容量估算缺陷在原阈值同样触发；不能据此宣称作者原平台也必然失败。对照为诊断，不计性能成绩；CSV在results/gkway-paper/old-threshold-check.csv，完整日志及命令在archive的gkway-failure-diagnosis-20261018。
+
+
+2026-10-18 G-kway与Jet既有结果对齐：41图×k4/8/16/32/64共205配置。按用户口径保留108份G-kway超载，排除失败，k2因data中Jet表不含该k而不比，k128未测。Jet相对G-kway耗时比几何平均2.008012×，146/205更快；G-kway/Jet切边比算术平均1.355718，Jet在200/205配置切边更低。97个G-kway容量合格子集对应1.559891×与1.294003。使用新阈值G-kway本轮结果和data既有Jet结果，不是同轮交错重测；保留G-kway原计时边界（初始分配在外、末尾清理另行加回）限制。表在results/gkway-paper/vs-jet*.csv，来源哈希与统计口径在archive同名目录jet-comparison-audit.json。未新跑实验、未改算法。
+
+### 2026-10-19：撤回 G-kway 层次存储容量修复
+
+按用户要求撤回本次独立存储扩容修复，删除修复版源码、构建产物及全部补跑/验证结果、日志和冻结档案，移除实验入口的修复版选择参数。该尝试的长耗时原因未完成受控归因，其结果不纳入最终 baseline 或论文统计。原 G-kway 源码（保留此前论文阈值修改）、修复前冻结程序、原始结果和 data 汇总均保留；输入数据集及其他方法的实验结果未删除。仅保留本条撤回记录。
+
+
+### 2026-10-19：指定第三方 iG-kway 实现的失败配置测试
+
+用户明确要求测试 pragnasri74/Incremental-k-way-Graph-Partitioning-on-GPU 的全图入口。固定远端最新提交 034e7c14d4b83208954af458062e60d6ea918b83，原源码及算法不改。选取原 G-kway failed.csv 的59个配置（10图，k2–64；ppa缺5个k），单图首次预热，GPU0空闲窗口依次运行，GPU重叠丢弃，单次180秒上限，OOM后排除该图剩余配置。
+
+独立测试入口直接调用 gkway_full_partition，Config只设置k，保留group_size=6、coarsen_min=35等默认值，不执行增量更新或构建增量bucket状态。为使用相同输入，入口将原有已核验int64二进制CSR逐项检查并转为该实现的int32 Graph，不改变边或编号，点边权均为1。时间含输出缓冲分配、库函数内上传/粗化/BFS初始化/投影细化/层次释放和输出缓冲释放；不含CUDA上下文建立、CPU读文件、输出标签D2H、cut复算和文件写入。结果是该第三方实现的探索性测试，不是论文作者G-kway†或原G-kway成绩，不并入data最终baseline。
+
+入口每次输出标签后由已有独立oracle复算cut/负载，先持久化核验再删除标签。源码静态核对发现group_size=6与保留粗层所需90%点数下降不相容，可能将首次粗化结果丢弃，需诊断核实实际流程。结果位于results/igkway-thirdparty-failed；冻结源码、构建、适配器、控制器和运行核验位于同级archive/experiments/igkway-thirdparty-failed-20261019。
+
+2026-10-19 测试完成：59配置全部结束，47个返回有效标签且独立cut复算一致，12个runtime_error。ppa的5个待测配置（k4–64），以及soc-Pokec、citation、kron20、ljournal-2008、kron21、com-Orkut、enwiki-2021各6个配置（k2–64）成功；com-LiveJournal和soc-LiveJournal1各6个配置失败。没有OOM或超时，标签已删除。逐配置时间/cut在results.csv，comparison.csv仅与data历史同图同k的Jet/Mt-METIS/KaMinPar切边对齐；k2没有该表中的对照，不伪填。
+
+流程诊断（不计性能）：ppa k4首次粗化576039→99409，减少82.7427%；soc-Pokec k4首次粗化1632803→272134，减少83.3333%。两者均被源码的90%门槛拒绝，最终标签与该库直接对原图执行BFS初始化逐点完全相同。默认分组最多6点，粗点数至少ceil(N/6)，单层最多减少83.3333%，因此有效分组不会达到90%门槛；原图BFS后levels只有一层，反粗化/细化循环不执行。保留算法原样，未调整门槛来包装速度成绩。
+
+失败诊断：com-LiveJournal k2在原binary上用Compute Sanitizer限定scatter_vertex_weights_kernel，报告13505个全局atomic越界错误，退出86；日志在logs/com-LiveJournal-memcheck.log。源码另有subset_index对组首标记做exclusive_scan的问题：标记[1,0,1,0]生成[0,1,1,2]，正确组号应为[0,0,1,1]，后者被用作粗组base索引；该问题与已撤回的旧G-kway固定层次存储修复不同。尚未做修正后的因果复验，不宣称排除了其他缺陷。sanitizer通过子进程启动，原生监视器会把其目标子进程标为overlap；该诊断不作时间样本。
+
+结果定位：第三方未改源码的运行筛查已完成，但这份实现的默认流程与完整多层划分不符，不能直接作为论文官方G-kway†基线，也不能将47份输出补入原G-kway统计。所有证据单独保留，data和原G-kway表不变。

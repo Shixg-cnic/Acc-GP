@@ -1,5 +1,15 @@
 # GPU图划分论文阅读与本项目方向
 
+阅读与早期设计的历史记录；当前方法和源码位置以[算法说明](../ALGORITHM.md)及[文件树](STRUCTURE.md)为准。
+
+## 2026-10-18：G-kway论文阈值与公开实现复核
+
+本地 `passage/G-kway.pdf` 第2页§3与第5页§4.1均写粗化停止阈值为 `|V| / (20 * log2(k))`；第5页明确用于全部实验。已渲染PDF核对分数排版，20在分母中。公开仓库 `wanluanlee/DAC_g-kway` 的本地干净提交 `f5b8bea929b7587bf65c9e816ab869579828bf1f` 则在 `gkway/graph_partitioner.hpp:22` 使用 `20 * NUM_PARTITIONS`，第66行按该阈值循环；第21行相近的按N/log2(k)公式带262159上限，已被注释。主入口不提供阈值覆盖。不能仅据公开实现断言论文实验当年用了哪个阈值。
+
+本次按用户要求测公开代码的20k默认算法，不替换为论文阈值。既有 `gkway-5090` 二进制曾修改容量上限，未用于正式测试。重新构建使用CUDA13/GCC13、sm_120；源码只增加计时同步和末尾GPU清理计时，保留原容量表达式和METIS默认调用。ModernGPU锁定作者子模块 `d8cf03d33917cb8ee792a59be54c4026913730e4`，仅对 `context.hxx` 中CUDA13删除的设备属性字段改用查询API。发现预装依赖额外改动 `cta_segscan.hxx` 运算顺序后，已撤回初测整批并恢复原依赖重测；撤回记录不计入正式比较。
+
+确认的高k限制：`update_vertex_info` 用128线程，每线程访问k个共享int，静态数组仅12000项；k=128需要16384项。恢复原依赖的二进制在16384顶点二维网格上经Compute Sanitizer确认共享内存越界（716条错误），不是仅由运行失败推测。诊断不计性能样本，也未修复算法后冒充原版。源码、计时补丁、依赖审计、诊断在 `../../Acc-GP-archive/experiments/gkway-current-20261018/`；结果入口为 `results/manual/gkway-current-20261018/`。
+
 实现进展（2026-10-17后续）：下文“推荐方向”保留研究时设计；当前代码已实现双向生长和精确事务前缀。首版采用两条有界贪心轨迹而非beam，只保留每轨迹最佳可行前缀；种子和扩展有明确预算。完全替换LP的首轮真实图试验失败，组合路径仅替换小层旧组阶段。当前实现及实际结果以[算法](../ALGORITHM.md)、[接续状态](../CONTINUATION.md)为准，不能把下文未实现时状态当成最新状态。
 
 
@@ -183,3 +193,22 @@
 ## 2026-10-16：用户确认的问题驱动粗化主线
 
 用户明确要求按HEM与粗化SCLP的局限→提出具体粗化机制→验证效果组织研究，Hybrid仅作属性，不把切换两个现有黑盒作为核心故事。HEM问题是互选竞争、点对限制和低效重复匹配；SCLP问题是多轮簇亲和力计算/容量竞争带来的工作量，不能笼统宣称质量差或必然慢。目标探索统一的容量约束多点聚合：低成本候选、竞争/容量准入、保留有效合并、仅推进残余活动域。结构/反馈可用于调度，但算法贡献须明确合并规则、活动域更新和工作量控制，不靠固定阈值与重命名。此机制尚未实现；当前仍是4轮HEM后可能整层回退SCLP，不冒称完成新方法。需要查新并在相同严格容量/初始化/细化条件下验证总时间和最终cut。
+
+
+## 2026-10-18：G-kway baseline 恢复论文粗化阈值
+
+用户要求将同级 `sotas/DAC_g-kway/gkway/graph_partitioner.hpp` 的粗化停止阈值从公开代码的 `20*k` 改为 DAC 2024 论文 §3/§4.1 的 `N/(20*log2(k))`，N固定为原输入顶点数，不使用旧注释中的262159上限。这是对照程序的论文参数恢复，不是 Acc-GP 的新机制；Acc-GP 与 Jet 算法没有改动。随后用户明确授权重新编译并测试。
+
+本轮 `gkway-paper-threshold-20261018` 比较 grid/wb-edu/soc-Pokec/stokes × k8/32 × 三重复，冻结四个程序交错测量：新阈值G-kway、20k旧阈值G-kway、Acc-GP f35523a9、Jet ca8fc1f9。G-kway保持原容量、METIS默认调用、作者锁定ModernGPU及相同计时补丁；k128因已确认且未修复的共享内存越界不运行。允许超载结果参与cut/时间比较，但保留独立容量核验标记。测量完成：96次正式尝试，84份有效输出，12次soc-Pokec运行错误（新旧阈值各6次）。新阈值G-kway在其余三图×k8/32均三次取得核验输出，超载保留；所有有效输出的日志cut均与独立复算一致。k4/16/64未测，k128未修复未测，不能外推全图集。此前20k结果不能视为新阈值成绩。原始日志/源码/二进制在同级archive对应目录，公开CSV在 `results/manual/gkway-paper-threshold-20261018/`。
+
+
+### 2026-10-18：G-kway失败根因诊断（非性能测量）
+
+已定位粗化各层共享边存储预分配不足：graph_partitioner.hpp使用MAX_COARSEN_LEVEL=6、COARSEN_RATE=0.6，固定分配约2.38336倍原图邻接项，真实图粗化后的边数下降不满足这一假设。外层越界预警仅输出文字，没有扩容或中止，最终construct_coarsen_graph写出数组。未改变任何生产算法/二进制；诊断副本仅加-g/-lineinfo，soc-Pokec k8经Compute Sanitizer确认coarsen.hpp:242全局写越界，3074条错误。其原图/前两层边项合计约114.8M，预分配106.3M。
+
+另在诊断副本中加入“已算出实际粗边数后、写出之前”的精确边界检查。9张全失败图各取k2，以及ppa k4/k32，共11配置全部在此处触发容量越界（具体数字见results/gkway-paper/diagnosis.csv）。这是代表配置的定位，不声称对59个失败逐一运行sanitizer。ppa k4的gdb异常落在metis_partition.hpp:19，即拷贝越界的粗图邻接区；ppa k32也在写入前边界检查中被拦截，说明其不同报错前已发生相同容量缺陷。更深层错误不能仅按异常文字分类。
+
+这些诊断不进入划分速度/切边统计；原306配置结果不修改。诊断源码、guard补丁、编译命令、sanitizer/gdb日志及summary.json在同级archive/experiments/gkway-failure-diagnosis-20261018。修复方向为按实际层次容量扩容或分层分配，并进行完整边界检查；k128的12000共享int不足是另一个独立缺陷。尚未实施生产修复或重测。
+
+
+2026-10-18阈值因果核对：用户询问是否修改粗化停止阈值导致社交图失败。使用保留的原20k冻结二进制(gkway_old)对enwiki-2021、com-Orkut、soc-Pokec、citation、com-LiveJournal、soc-LiveJournal1、ljournal-2008各跑k2一次，7/7全部退出-6，全部出现global_edge_offset超出容量提示及GPU illegal memory access。与论文阈值k2失败一致，说明在当前5090/CUDA13环境这些故障并非改阈值后才出现。现有soc-Pokec k8/32三重复对照亦新旧均失败。源仓库git diff仅阈值、cmath及说明；实测副本额外含同步/清理计时，ModernGPU锁定作者版本且只改CUDA13设备属性API。诊断guard/-g/-lineinfo仅在独立副本，未进入正式baseline。阈值会改变层数/质量/时间，但固定容量估算缺陷在原阈值同样触发；不能据此宣称作者原平台也必然失败。对照为诊断，不计性能成绩；CSV在results/gkway-paper/old-threshold-check.csv，完整日志及命令在archive的gkway-failure-diagnosis-20261018。

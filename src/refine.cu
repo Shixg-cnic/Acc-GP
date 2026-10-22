@@ -3,7 +3,6 @@
 #include "check.hpp"
 #include "detail/scratch_pool.hpp"
 #include "detail/scratch_buffer.hpp"
-#include "detail/group_record.hpp"
 #include "graph_types.hpp"
 #include "partition_capacity.hpp"
 
@@ -202,10 +201,9 @@ std::vector<std::uint64_t> validate_and_measure_partition(
 
 }  // namespace
 
-#include "refine_affinity.cuh"
+#include "refinement/affinity.cuh"
 
-#include "refine_groups.cuh"
-#include "refine_joint.cuh"
+#include "refinement/exchange.cuh"
 
 // Each cache build writes all n*k affinity entries and n row totals before
 // any read. A raw pool allocation avoids device_vector's redundant zero fill.
@@ -260,21 +258,9 @@ public:
     detail::ScratchBuffer<std::uint64_t> balance_bucket_ranks;
     detail::ScratchBuffer<unsigned long long> balance_bucket_counts;
     detail::ScratchBuffer<unsigned long long> balance_bucket_offsets;
-    detail::ScratchBuffer<JointMove> joint_moves;
+    detail::ScratchBuffer<JointMove> joint_moves, joint_archive, joint_candidates;
     detail::ScratchBuffer<unsigned long long> joint_quotient, joint_seeds, joint_events;
-    detail::ScratchBuffer<int> joint_partner, joint_visits, joint_stops, joint_selected;
-    detail::ScratchBuffer<BoundaryGroup> boundary_groups;
-    detail::ScratchBuffer<GroupTransaction> group_transactions;
-    detail::ScratchBuffer<std::int32_t> group_order;
-    detail::ScratchBuffer<GroupRadixKey> group_sort_keys,group_sort_other;
-    detail::ScratchBuffer<std::uint8_t> group_sort_temp;
-    detail::ScratchBuffer<unsigned int> group_sort_errors;
-    detail::ScratchBuffer<unsigned long long> group_sort_limits;
-    detail::ScratchBuffer<std::int32_t> group_weight_order;
-    detail::ScratchBuffer<std::int32_t> group_tree;
-    detail::ScratchBuffer<GroupRange> group_ranges;
-    detail::ScratchBuffer<int> group_active_pairs;
-    detail::ScratchBuffer<GroupTransaction> group_candidates;
+    detail::ScratchBuffer<int> joint_partner, joint_visits, joint_stops;
     detail::ScratchBuffer<double> repair_prices;
     detail::ScratchBuffer<RepairSample> repair_samples;
     double resize_seconds = 0.0;
@@ -324,9 +310,7 @@ public:
         if (options.parts < 2 || options.parts > kMaxParts ||
             options.max_rounds < 0 || options.max_rounds > 64 ||
             options.stale_rounds < 1 || options.stale_rounds > 64 ||
-            options.joint_rounds < 0 || options.joint_rounds > 32 ||
-            options.joint_conflict_rounds < 1 || options.joint_conflict_rounds > 4 ||
-            options.boundary_group_rounds < 0 || options.boundary_group_rounds > 8 ||
+            options.exchange_rounds < 0 || options.exchange_rounds > 8 ||
             !std::isfinite(options.refinement_growth_ratio) || options.refinement_growth_ratio < 1.0 ||
             !std::isfinite(options.imbalance_ratio) ||
             options.imbalance_ratio < 1.0 || n <= 0) {
@@ -481,7 +465,7 @@ struct ToCheckedWeight {
     __host__ __device__ CheckedWeight operator()(W weight) const { return CheckedWeight(weight); }
 };
 
-#include "refine_incremental.cuh"
+#include "refinement/incremental.cuh"
 
 void refine_partition(
     const WeightedGraph& graph,
@@ -503,9 +487,7 @@ DeviceUncoarsenResult refine_hierarchy_impl(
     using VertexT = gpart::GraphTypes::VertexT;
     if (options.parts < 2 || options.parts > kMaxParts || options.max_rounds < 0 ||
         options.max_rounds > 64 || options.stale_rounds < 1 || options.stale_rounds > 64 ||
-        options.joint_rounds < 0 || options.joint_rounds > 32 ||
-            options.joint_conflict_rounds < 1 || options.joint_conflict_rounds > 4 ||
-            options.boundary_group_rounds < 0 || options.boundary_group_rounds > 8 ||
+            options.exchange_rounds < 0 || options.exchange_rounds > 8 ||
         !std::isfinite(options.refinement_growth_ratio) || options.refinement_growth_ratio < 1.0 ||
         !std::isfinite(options.imbalance_ratio) ||
         options.imbalance_ratio < 1.0) {

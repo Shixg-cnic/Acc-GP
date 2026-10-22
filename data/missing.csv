@@ -1,0 +1,14 @@
+﻿category,graph,k,method,available_repeats,missing_repeats,reason,has_any_result
+Social Network,soc-Pokec,128,mtmetis,2,3,runtime_error,True
+Social Network,com-LiveJournal,64,mtmetis,2,2,runtime_error,True
+Social Network,com-LiveJournal,128,mtmetis,2,2,runtime_error,True
+Social Network,soc-LiveJournal1,64,mtmetis,1,1;3,runtime_error,True
+Social Network,soc-LiveJournal1,128,mtmetis,1,2;3,runtime_error,True
+Biology,kmer_V2a,32,mtmetis,2,1,runtime_error,True
+Biology,kmer_V2a,64,mtmetis,1,2;3,runtime_error,True
+Biology,kmer_V2a,128,mtmetis,2,3,runtime_error,True
+Biology,kmer_U1a,8,mtmetis,1,2;3,runtime_error,True
+Biology,kmer_U1a,16,mtmetis,1,1;3,runtime_error,True
+Biology,kmer_U1a,32,mtmetis,0,1;2;3,runtime_error,False
+Biology,kmer_U1a,64,mtmetis,0,1;2;3,runtime_error,False
+Biology,kmer_U1a,128,mtmetis,0,1;2;3,runtime_error,False

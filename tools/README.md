@@ -1,24 +1,13 @@
-# 辅助工具
-
-日常只用仓库根目录的两个入口：
-
-```bash
-./run.sh
-./analyze_cuts.sh
-```
-
-构建目录为`build/`，由用户自行编译。用法、默认52图/六种k/三次重复/新粗化与旧粗化及Jet三方法、GPU选择、断点恢复和三个CSV的列含义见[根目录说明](../README.md)。脚本不生成报告或图片。
+# 当前运行与核验工具
 
 | 文件 | 用途 |
 | --- | --- |
-| benchmark_selection.json | 九类选集、k、用户删除/显存排除与目标 |
-| verify_csr.cpp | 编译成build/gpart_verify_csr，从原始CSR独立计算cut、负载、容量 |
-| verify_partition.py | Python独立核验参考，支持二进制/文本标签 |
-| run_gpu_optimization.py | 保留的历史三方法实验入口，日常由run.sh代替 |
-| run_gpu_categories.py | 保留的历史九类两方法入口，日常由run.sh代替 |
-| compare_jet.py | 保留的显式输入旧对照入口与回归检查 |
-| run_cpu_baselines.py | 已有官方CPU基线入口；旧1950次任务已完成，不自动重启 |
-| check_gpu_optimization.py / check_gpu_categories.py | 历史实验保存记录的审计 |
-| result_storage.py | 旧入口的路径迁移、标签清理和CSV辅助 |
+| `benchmark_selection.json` | 当前九类51图清单、排除项及实验参数 |
+| `run_cpu_baselines.py` | 官方Mt-METIS、KaMinPar和mt-KaHIP测量；按变体保存身份，独立核验cut/负载，支持恢复、失败历史与临时标签清理 |
+| `run_gkway.py` | 既有G-kway基线测量、错误记录、核验及断点续跑 |
+| `result_storage.py` | 原始记录映射到仓库外archive，发布表格，持久化核验后删除标签 |
+| `verify_csr.cpp` | 独立CPU CSR核验器，构建为`gpart_verify_csr` |
 
-旧`report_gpu_*.py`和`plot_gpu_*.py`已迁到同级`../Acc-GP-archive/legacy-tools-20261016/`，不再作为当前流程的依赖。单独的Python/C++核验器只读标签，不替调用者删除标签；自动清理由两个.sh入口负责。
+GPU批量测量与切边分析分别由根目录`run.sh`和`analyze_cuts.sh`执行。CPU/G-kway命令由`run_cpu_baselines.sh`和`run_gkway.sh`启动，详见根目录README及各入口`--help`。
+
+旧`compare_jet.py`、`verify_partition.py`、`run_gpu_categories.py`、`check_gpu_categories.py`、`run_gpu_optimization.py`和`check_gpu_optimization.py`已从主仓库移除，清理前版本保存在同级archive的`maintenance/source-cleanup-20261019/before/tools/`。当前入口不依赖这些文件。

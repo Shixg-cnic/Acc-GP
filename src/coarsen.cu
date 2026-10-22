@@ -1,11 +1,11 @@
 #include "check.hpp"
 #include "coarsen.hpp"
-#include "detail/sclp_record.hpp"
-#include "detail/sclp_admission.hpp"
+#include "detail/contraction_record.hpp"
+#include "detail/capacity_admission.hpp"
 #include "detail/scratch_buffer.hpp"
 #include "detail/scratch_pool.hpp"
-#include "coarsen_rows.cuh"
-#include "coarsen_matching.cuh"
+#include "coarsening/contraction_rows.cuh"
+#include "coarsening/seed_matching.cuh"
 
 #include <algorithm>
 #include <chrono>
@@ -101,12 +101,15 @@ __global__ void record_bound_kernel(
 template <typename OffsetT>
 __global__ void contract_record_bounds(std::int64_t n, const std::int32_t* map,
     const unsigned long long* fine_bounds, unsigned long long* coarse_bounds,
-    const OffsetT* offsets, OffsetT* raw_counts) {
+    const OffsetT* offsets, OffsetT* raw_counts,bool bounded_sum) {
     const auto v = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (v >= n) return;
     if (raw_counts) row_atomic_add(raw_counts + map[v], offsets[v + 1] - offsets[v]);
     auto* target = coarse_bounds + map[v];
     const auto amount = fine_bounds[v];
+    // n * maximum input bound is a sufficient proof that no receiver sum
+    // overflows. The unusual unbounded case retains saturating CAS semantics.
+    if(bounded_sum) {atomicAdd(target,amount);return;}
     auto previous = atomicCAS(target, 0ULL, 0ULL);
     while (true) {
         const auto sum = ~0ULL - previous < amount ? ~0ULL : previous + amount;
@@ -289,8 +292,8 @@ constexpr int SCLP_MEDIUM_HASH_SIZE = 512;
 constexpr std::int32_t SCLP_INVALID = 0x7fffffff;
 
 
-#include "coarsen_residual.cuh"
-#include "coarsen_sclp.cuh"
+#include "coarsening/singleton_growth.cuh"
+#include "coarsening/aggregation.cuh"
 }  // namespace
 
 struct SclpWorkspace::Impl {
@@ -1489,7 +1492,8 @@ DeviceWeightedGraph contract_typed(
             thrust::raw_pointer_cast(ws.row_weight_bounds.data()),
             thrust::raw_pointer_cast(ws.next_row_weight_bounds.data()),
             thrust::raw_pointer_cast(fine.offsets.data()),
-            count_raw ? thrust::raw_pointer_cast(raw_offsets.data()) : nullptr);
+            count_raw ? thrust::raw_pointer_cast(raw_offsets.data()) : nullptr,
+            n>0 && ws.maximum_row_weight<=UINT64_MAX/static_cast<std::uint64_t>(n));
         CUDA_CHECK(cudaGetLastError());
         if (count_raw) {
             const auto limits = thrust::transform_reduce(detail::scratch_policy(),

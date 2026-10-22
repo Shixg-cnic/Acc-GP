@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
 # Run from any directory. Build the project yourself with cmake -B build first.
-# Optional examples: GPU=1 ./run.sh; GRAPHS="grid products" REPEATS=1 ./run.sh
+# Optional examples: GPU=1 ./run.sh; GRAPHS="grid soc-Pokec" REPEATS=1 ./run.sh
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 if [[ "${1:-}" == "--help" ]]; then
     cat <<'HELP'
 Usage: ./run.sh [work-directory]
-Defaults: 52 selected datasets, k=4/8/16/32/64/128, 3 repeats, regret Acc-GP + Jet.
+Defaults: 51 selected datasets, k=4/8/16/32/64/128, 3 repeats, regret Acc-GP + Jet.
 Compile yourself in build/. The script never compiles anything.
-Settings: GPU=auto|index|UUID, GRAPHS="grid products", PARTS="4 8", REPEATS=3,
+Settings: GPU=auto|index|UUID, GRAPHS="grid soc-Pokec", PARTS="4 8", REPEATS=3,
           BUILD_DIR, DATA_DIR, JET_BIN, COMPARE_JET=0,
-          GPART_COARSEN_MODE=regret, GPART_REFINE_MODE=legacy|joint|joint-polish,
-          GPART_JOINT_ROUNDS=2, GPART_JOINT_CONFLICT_ROUNDS=1..4,
-          GPART_JOINT_DEDUPLICATE=0|1, REFERENCE_BIN,
+          GPART_COARSEN_MODE=regret, REFERENCE_BIN (archived algorithm comparison),
+          REFERENCE_REFINE_MODE=legacy|joint|joint-polish (archived executable only),
           REFERENCE_COARSEN_MODE (optional, for Acc-GP reference binaries), TIMEOUT=600.
 Results: results/manual/<run-name>/*.csv; raw logs outside the source repository.
 Re-run with the same work-directory to resume an interrupted experiment.
@@ -96,7 +95,12 @@ try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
 except BlockingIOError: raise SystemExit('This experiment is already running.')
 published = Path(os.environ.get('RESULTS_DIR', str(root / 'results/manual' / out.name))).resolve()
 env = dict(os.environ, OMP_NUM_THREADS='4')
-for key in ['GPART_GPU_TIMINGS', 'SCLP_DIAGNOSTICS', 'GPART_JOINT_DIAGNOSTICS']: env.pop(key, None)
+for key in ['GPART_GPU_TIMINGS', 'SCLP_DIAGNOSTICS']: env.pop(key, None)
+retired_refine = ['GPART_REFINE_MODE', 'GPART_JOINT_ROUNDS', 'GPART_JOINT_CONFLICT_ROUNDS',
+                  'GPART_JOINT_DEDUPLICATE', 'GPART_JOINT_COMPLEMENT', 'GPART_JOINT_DIAGNOSTICS',
+                  'GPART_SPARSE_DELTA', 'GPART_REPAIR_ENUMERATION', 'GPART_SPARSE_CUT_BOUND']
+stale = [key for key in retired_refine if key in env]
+if stale: raise SystemExit('Retired production controls; unset: ' + ', '.join(stale) + '. Use REFERENCE_* for archived binaries.')
 ours_mode = env.get('GPART_COARSEN_MODE', 'regret')
 if ours_mode != 'regret': raise SystemExit('Only regret coarsening is maintained; use REFERENCE_BIN for archived modes.')
 method_overrides = {method: {} for method in methods}
@@ -106,6 +110,23 @@ if os.environ.get('REFERENCE_COARSEN_MODE'):
     if 'reference' not in methods or reference_mode not in ['regret', 'residual', 'legacy', 'sclp']:
         raise SystemExit('REFERENCE_COARSEN_MODE requires REFERENCE_BIN and a valid mode.')
     method_overrides['reference'] = {'GPART_COARSEN_MODE': reference_mode}
+if os.environ.get('REFERENCE_REPAIR_ENUMERATION') is not None:
+    repair_mode = os.environ['REFERENCE_REPAIR_ENUMERATION']
+    if 'reference' not in methods or repair_mode not in ['0', '1']:
+        raise SystemExit('REFERENCE_REPAIR_ENUMERATION requires REFERENCE_BIN and 0 or 1.')
+    method_overrides['reference']['GPART_REPAIR_ENUMERATION'] = repair_mode
+if os.environ.get('REFERENCE_SPARSE_CUT_BOUND') is not None:
+    sparse_mode = os.environ['REFERENCE_SPARSE_CUT_BOUND']
+    if 'reference' not in methods or sparse_mode not in ['0', '1']:
+        raise SystemExit('REFERENCE_SPARSE_CUT_BOUND requires REFERENCE_BIN and 0 or 1.')
+    method_overrides['reference']['GPART_SPARSE_CUT_BOUND'] = sparse_mode
+for name, allowed in [('REFERENCE_REFINE_MODE', ['legacy', 'joint', 'joint-polish']),
+                      ('REFERENCE_JOINT_COMPLEMENT', ['0', '1']),
+                      ('REFERENCE_SPARSE_DELTA', ['0', '1'])]:
+    if name in os.environ:
+        if 'reference' not in methods or os.environ[name] not in allowed:
+            raise SystemExit(name + ' requires REFERENCE_BIN and one of: ' + ', '.join(allowed))
+        method_overrides['reference']['GPART_' + name[len('REFERENCE_'):]] = os.environ[name]
 identity = dict(graphs=chosen, parts=parts, repeats=repeats, methods=methods,
                 gpu=os.environ['GPU'], gpu_inventory=inventory, seed=0, imbalance='1.03',
                 capacity='floor(103*N/(100*k))', omp_num_threads=4, timeout_seconds=timeout, results=str(published),

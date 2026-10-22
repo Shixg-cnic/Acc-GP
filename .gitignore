@@ -22,7 +22,10 @@ _deps/
 gpart_*
 
 # Input datasets and generated results.
-/data/
+/data/*
+# Reviewed baseline tables and their user-requested documentation.
+!/data/*.csv
+!/data/*.md
 /dataset/
 /results/
 # Reviewed CSV/Markdown result snapshots are explicitly committed;

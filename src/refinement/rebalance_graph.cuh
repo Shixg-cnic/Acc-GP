@@ -62,13 +62,6 @@ __global__ void finish_rebalance_iteration(int k,const unsigned long long* loads
     cudaGraphSetConditional(condition,!state->validation_errors && !state->feasible && *count && state->iterations<2*k+4);
 }
 
-__global__ void initialize_receiver_slack(int k,const unsigned long long* loads,
-    std::uint64_t capacity,unsigned long long* slack,unsigned long long* requests) {
-    for (int p=threadIdx.x;p<k;p+=blockDim.x) {
-        slack[p]=loads[p]<capacity ? capacity-loads[p] : 0;requests[p]=0;
-    }
-}
-
 __device__ unsigned long long load_receiver_slack(unsigned long long* value) {
     cuda::atomic_ref<unsigned long long,cuda::thread_scope_device> ref(*value);
     return ref.load(cuda::memory_order_relaxed);
@@ -199,7 +192,9 @@ public:
         auto* offsets=thrust::raw_pointer_cast(c.graph.offsets.data());
         auto* neighbors=thrust::raw_pointer_cast(c.graph.neighbors.data());
         auto* edges=thrust::raw_pointer_cast(c.graph.edge_weights.data());
-        count_.resize(1);state_.resize(1);receiver_slack_.resize(k);receiver_requests_.resize(k);
+        count_.resize(1);state_.resize(1);receiver_slack_.resize(cache.repair_enumeration ? 2*k+1 : k);receiver_requests_.resize(k);
+        if(cache.repair_enumeration)
+            cache.repair_slack_cdf=thrust::raw_pointer_cast(receiver_slack_.data())+k;
         auto* count=thrust::raw_pointer_cast(count_.data());
         const bool compact_donors=n>=65536;
         if(compact_donors) { donors_.resize(n);donor_count_.resize(1); }
@@ -226,10 +221,16 @@ public:
             collect_rebalance_donors<<<c.vertex_blocks,256,0,stream_>>>(n,labels,loads,c.capacity,donors,donor_count);
         }
         CUDA_CHECK(cudaMemsetAsync(counts,0,histogram_bytes,stream_));
-        incremental_rebalance_proposals<<<donor_blocks,256,0,stream_>>>(n,cache,labels,vw,k,loads,c.capacity,targets,ids,ranks,counts,donors,donor_count);
+        if(cache.repair_enumeration)
+            initialize_receiver_slack<<<1,32,0,stream_>>>(k,loads,c.capacity,thrust::raw_pointer_cast(receiver_slack_.data()),thrust::raw_pointer_cast(receiver_requests_.data()),thrust::raw_pointer_cast(receiver_slack_.data())+k);
+        if(cache.repair_enumeration)
+            incremental_rebalance_proposals<gpart::GraphTypes::VertexT,gpart::GraphTypes::WeightT,CacheT,true><<<donor_blocks,256,0,stream_>>>(n,cache,labels,vw,k,loads,c.capacity,targets,ids,ranks,counts,donors,donor_count);
+        else
+            incremental_rebalance_proposals<<<donor_blocks,256,0,stream_>>>(n,cache,labels,vw,k,loads,c.capacity,targets,ids,ranks,counts,donors,donor_count);
         balance_scan_buckets<<<k,32,0,stream_>>>(counts,prefix);
         if (verify) validate_balance_prefix<<<k,32,0,stream_>>>(counts,prefix,thrust::raw_pointer_cast(state_.data()));
-        initialize_receiver_slack<<<1,32,0,stream_>>>(k,loads,c.capacity,thrust::raw_pointer_cast(receiver_slack_.data()),thrust::raw_pointer_cast(receiver_requests_.data()));
+        if(!cache.repair_enumeration)
+            initialize_receiver_slack<<<1,32,0,stream_>>>(k,loads,c.capacity,thrust::raw_pointer_cast(receiver_slack_.data()),thrust::raw_pointer_cast(receiver_requests_.data()));
         reserve_receiver_prefixes<<<donor_blocks,256,0,stream_>>>(n,k,labels,vw,cache,ids,ranks,prefix,loads,c.capacity,thrust::raw_pointer_cast(receiver_slack_.data()),thrust::raw_pointer_cast(receiver_requests_.data()),targets,flags,donors,donor_count);
         if(verify) {
             CUDA_CHECK(cudaMemsetAsync(counts,0,k*sizeof(*counts),stream_));

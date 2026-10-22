@@ -1,0 +1,107 @@
+﻿category,graph,k,status,seconds,cut,cut_ratio,capacity_ok,max_load_ratio,reported_cut_matches,coarsest_vertices,coarsen_seconds,initial_partition_seconds,uncoarsen_seconds,returncode,error,source_batch
+Social Network,soc-Epinions1,2,runtime_error,,,,,,,,,,,-6,"usage: ./gkway graph_file num_partition 
+terminate called after throwing an instance of 'std::runtime_error'
+  what():  Cuda Runtime Error: invalid argument
+",social-candidates-20261019
+Social Network,soc-Epinions1,4,runtime_error,,,,,,,,,,,-6,"usage: ./gkway graph_file num_partition 
+terminate called after throwing an instance of 'std::runtime_error'
+  what():  Cuda Runtime Error: invalid argument
+",social-candidates-20261019
+Social Network,soc-Epinions1,8,runtime_error,,,,,,,,,,,-11,"usage: ./gkway graph_file num_partition 
+",social-candidates-20261019
+Social Network,soc-Epinions1,16,runtime_error,,,,,,,,,,,-11,"usage: ./gkway graph_file num_partition 
+",social-candidates-20261019
+Social Network,soc-Epinions1,32,runtime_error,,,,,,,,,,,-11,"usage: ./gkway graph_file num_partition 
+",social-candidates-20261019
+Social Network,soc-Epinions1,64,runtime_error,,,,,,,,,,,-11,"usage: ./gkway graph_file num_partition 
+",social-candidates-20261019
+Social Network,soc-Slashdot0902,2,runtime_error,,,,,,,,,,,-11,"usage: ./gkway graph_file num_partition 
+",social-candidates-20261019
+Social Network,soc-Slashdot0902,4,runtime_error,,,,,,,,,,,-11,"usage: ./gkway graph_file num_partition 
+",social-candidates-20261019
+Social Network,soc-Slashdot0902,8,runtime_error,,,,,,,,,,,-11,"usage: ./gkway graph_file num_partition 
+",social-candidates-20261019
+Social Network,soc-Slashdot0902,16,runtime_error,,,,,,,,,,,-11,"usage: ./gkway graph_file num_partition 
+",social-candidates-20261019
+Social Network,soc-Slashdot0902,32,runtime_error,,,,,,,,,,,-11,"usage: ./gkway graph_file num_partition 
+",social-candidates-20261019
+Social Network,soc-Slashdot0902,64,runtime_error,,,,,,,,,,,-11,"usage: ./gkway graph_file num_partition 
+",social-candidates-20261019
+Social Network,wiki-Talk,2,overloaded,1.631550484,638517,0.13703360721440735,False,1.0300006055834796,True,81253,0.062762,1.13956,0.42675,0,,social-candidates-20261019
+Social Network,wiki-Talk,4,overloaded,2.218220816,1222436,0.26234981162404647,False,1.0300014408710378,True,19297,0.067856,0.469064,1.67904,0,,social-candidates-20261019
+Social Network,wiki-Talk,8,overloaded,6.579363005,1664890,0.3573058858498594,False,1.0300031114461543,True,19311,0.06869,0.495262,6.013,0,,social-candidates-20261019
+Social Network,wiki-Talk,16,overloaded,21.571134376,1873160,0.4020031912850234,False,1.0300031114461543,True,19315,0.069077,0.556045,20.9437,0,,social-candidates-20261019
+Social Network,wiki-Talk,32,overloaded,73.489272978,1998264,0.4288520494938905,False,1.0300097937466197,True,19301,0.068918,0.746584,72.6713,0,,social-candidates-20261019
+Social Network,wiki-Talk,64,overloaded,186.374893034,2098176,0.4502943944338152,False,1.0300097937466197,True,19309,0.069491,1.24459,185.058,0,,social-candidates-20261019
+Social Network,com-DBLP,2,ok,0.062444602,60399,0.05753019909207461,True,1.0296770531096253,True,7669,0.006774,0.043744,0.011094,0,,social-candidates-20261019
+Social Network,com-DBLP,4,overloaded,0.072868639,118822,0.11317825322469725,False,1.0300113536016147,True,7665,0.006789,0.05317,0.012167,0,,social-candidates-20261019
+Social Network,com-DBLP,8,overloaded,0.054958931,158342,0.15082115241373661,False,1.03002396871452,True,1884,0.008112,0.03414,0.011901,0,,social-candidates-20261019
+Social Network,com-DBLP,16,overloaded,0.083163757,182744,0.17406411865895266,False,1.0300491989403304,True,1886,0.007973,0.055058,0.019323,0,,social-candidates-20261019
+Social Network,com-DBLP,32,overloaded,0.141433742,201586,0.19201117094943546,False,1.0300996593919516,True,1880,0.00835,0.103027,0.029256,0,,social-candidates-20261019
+Social Network,com-DBLP,64,overloaded,0.188941123,214699,0.2045013363610213,False,1.0302005802951937,True,1881,0.007877,0.149304,0.03131,0,,social-candidates-20261019
+Social Network,ca-AstroPh,2,overloaded,0.023537289,30958,0.1563140621055289,False,1.030044747496271,True,588,0.005419,0.003667,0.014211,0,,social-candidates-20261019
+Social Network,ca-AstroPh,4,overloaded,0.018900703,63219,0.3192072708911891,False,1.030044747496271,True,359,0.006107,0.002999,0.009574,0,,social-candidates-20261019
+Social Network,ca-AstroPh,8,overloaded,0.015050726,75923,0.38335268871497097,False,1.6641806946516087,True,304,0.006618,0.002066,0.006096,0,,social-candidates-20261019
+Social Network,ca-AstroPh,16,out_of_memory,,,,,,,,,,,-6,"usage: ./gkway graph_file num_partition 
+terminate called after throwing an instance of 'mgpu::cuda_exception_t'
+  what():  out of memory
+",social-candidates-20261019
+Social Network,ca-AstroPh,32,skipped_after_oom,,,,,,,,,,,,Dataset excluded after an out-of-memory failure,social-candidates-20261019
+Social Network,ca-AstroPh,64,skipped_after_oom,,,,,,,,,,,,Dataset excluded after an out-of-memory failure,social-candidates-20261019
+Social Network,dblp-2010,2,ok,0.038365692,34548,0.04822041705049828,True,1.0276353389602186,True,5534,0.006049,0.023769,0.007998,0,,social-candidates-20261019
+Social Network,dblp-2010,4,overloaded,0.044742616,64886,0.09056472098930854,False,1.0300115276066304,True,5533,0.006038,0.028837,0.009286,0,,social-candidates-20261019
+Social Network,dblp-2010,8,overloaded,0.042909515,86154,0.12024956033833012,False,1.0300115276066304,True,1347,0.007604,0.025823,0.008985,0,,social-candidates-20261019
+Social Network,dblp-2010,16,overloaded,0.068231915,99365,0.1386888311978338,False,1.0300468612668001,True,1345,0.006935,0.04603,0.014749,0,,social-candidates-20261019
+Social Network,dblp-2010,32,overloaded,0.101404154,107876,0.1505680707925076,False,1.0300468612668001,True,1346,0.007133,0.075223,0.01852,0,,social-candidates-20261019
+Social Network,dblp-2010,64,overloaded,0.127162313,115392,0.1610585378109036,False,1.0300468612668001,True,1346,0.007056,0.096872,0.022614,0,,social-candidates-20261019
+Social Network,hollywood-2009,2,overloaded,3.639377727,5234636,0.09296656293884135,False,1.0300002057755586,True,14725,0.137193,1.58505,1.9034,0,,social-candidates-20261019
+Social Network,hollywood-2009,4,overloaded,2.218775313,14122397,0.2508122263988946,False,1.0300002057755586,True,14739,0.131533,1.68636,0.378803,0,,social-candidates-20261019
+Social Network,hollywood-2009,8,ok,2.280316749,19561949,0.3474180750896346,True,1.029072345074388,True,14706,0.136269,1.83259,0.298501,0,,social-candidates-20261019
+Social Network,hollywood-2009,16,overloaded,1.640107468,24408154,0.4334861459444233,False,1.0300002057755586,True,3290,0.170796,0.398928,1.05756,0,,social-candidates-20261019
+Social Network,hollywood-2009,32,overloaded,6.830643399,29967962,0.5322277280448546,False,1.0300151712707388,True,3323,0.16985,0.547624,6.09864,0,,social-candidates-20261019
+Social Network,hollywood-2009,64,overloaded,16.868559876,33908592,0.6022128859266418,False,1.0300451022610992,True,3316,0.173315,0.921325,15.7614,0,,social-candidates-20261019
+Social Network,amazon-2008,2,overloaded,0.164215812,97849,0.027770619434466914,False,1.0300017815300215,True,13741,0.008908,0.135871,0.01777,0,,social-candidates-20261019
+Social Network,amazon-2008,4,overloaded,0.189705083,222007,0.06300802163320725,False,1.0300017815300215,True,13731,0.008382,0.141871,0.037905,0,,social-candidates-20261019
+Social Network,amazon-2008,8,overloaded,0.155568702,347307,0.09856953595771444,False,1.0300017815300215,True,3488,0.011298,0.077823,0.064857,0,,social-candidates-20261019
+Social Network,amazon-2008,16,overloaded,0.239521277,462216,0.13118197051090516,False,1.0300126611026719,True,3471,0.010665,0.09475,0.130886,0,,social-candidates-20261019
+Social Network,amazon-2008,32,overloaded,0.389902576,553712,0.15714953886393876,False,1.0300344202479728,True,3494,0.015049,0.155564,0.217631,0,,social-candidates-20261019
+Social Network,amazon-2008,64,overloaded,0.709656896,631363,0.17918774436124368,False,1.030077938538574,True,3469,0.010875,0.277614,0.419561,0,,social-candidates-20261019
+Social Network,ca-CondMat,2,overloaded,0.014925886,7101,0.07599610441036399,False,1.030043660571478,True,1028,0.004135,0.003215,0.007345,0,,social-extra-20261019
+Social Network,ca-CondMat,4,overloaded,0.017908873,0,0,False,3.6942895430769895,True,571,0.005726,0.001817,0.005719,0,,social-extra-20261019
+Social Network,ca-CondMat,8,out_of_memory,,,,,,,,,,,-6,"usage: ./gkway graph_file num_partition 
+terminate called after throwing an instance of 'mgpu::cuda_exception_t'
+  what():  out of memory
+",social-extra-20261019
+Social Network,ca-CondMat,16,skipped_after_oom,,,,,,,,,,,,Dataset excluded after an out-of-memory failure,social-extra-20261019
+Social Network,ca-CondMat,32,skipped_after_oom,,,,,,,,,,,,Dataset excluded after an out-of-memory failure,social-extra-20261019
+Social Network,ca-CondMat,64,skipped_after_oom,,,,,,,,,,,,Dataset excluded after an out-of-memory failure,social-extra-20261019
+Social Network,ca-HepTh,2,overloaded,0.011782682,1827,0.07034227852000154,False,1.0300698592690087,True,482,0.003953,0.001185,0.006358,0,,social-extra-20261019
+Social Network,ca-HepTh,4,out_of_memory,,,,,,,,,,,-6,"usage: ./gkway graph_file num_partition 
+terminate called after throwing an instance of 'mgpu::cuda_exception_t'
+  what():  out of memory
+",social-extra-20261019
+Social Network,ca-HepTh,8,skipped_after_oom,,,,,,,,,,,,Dataset excluded after an out-of-memory failure,social-extra-20261019
+Social Network,ca-HepTh,16,skipped_after_oom,,,,,,,,,,,,Dataset excluded after an out-of-memory failure,social-extra-20261019
+Social Network,ca-HepTh,32,skipped_after_oom,,,,,,,,,,,,Dataset excluded after an out-of-memory failure,social-extra-20261019
+Social Network,ca-HepTh,64,skipped_after_oom,,,,,,,,,,,,Dataset excluded after an out-of-memory failure,social-extra-20261019
+Social Network,ca-GrQc,2,skipped_after_oom,,,,,,,,,,,,Dataset excluded after an out-of-memory failure,social-extra-20261019
+Social Network,ca-GrQc,4,skipped_after_oom,,,,,,,,,,,,Dataset excluded after an out-of-memory failure,social-extra-20261019
+Social Network,ca-GrQc,8,skipped_after_oom,,,,,,,,,,,,Dataset excluded after an out-of-memory failure,social-extra-20261019
+Social Network,ca-GrQc,16,skipped_after_oom,,,,,,,,,,,,Dataset excluded after an out-of-memory failure,social-extra-20261019
+Social Network,ca-GrQc,32,skipped_after_oom,,,,,,,,,,,,Dataset excluded after an out-of-memory failure,social-extra-20261019
+Social Network,ca-GrQc,64,skipped_after_oom,,,,,,,,,,,,Dataset excluded after an out-of-memory failure,social-extra-20261019
+Social Network,ego-Facebook,2,ok,0.012557242,371,0.004204728336015595,True,1.0289675662292648,True,47,0.004256,0.000647,0.007267,0,,social-extra-20261019
+Social Network,ego-Facebook,4,overloaded,0.012358483,2719,0.030815785298184375,False,1.0309482545184452,True,47,0.004211,0.000953,0.00693,0,,social-extra-20261019
+Social Network,ego-Facebook,8,overloaded,0.013921843,11617,0.1316612643652107,False,1.0319385986630354,True,47,0.004168,0.001611,0.007853,0,,social-extra-20261019
+Social Network,ego-Facebook,16,overloaded,0.016239623,24663,0.2795180995987941,False,1.1487992077246842,True,47,0.004256,0.002057,0.009525,0,,social-extra-20261019
+Social Network,ego-Facebook,32,overloaded,0.01328238,32422,0.3674547226692658,False,2.82842287694974,True,47,0.004552,0.002438,0.005848,0,,social-extra-20261019
+Social Network,ego-Facebook,64,overloaded,0.026919921,59323,0.6723371942788494,False,1.3151770240158456,True,209,0.004177,0.010893,0.011629,0,,social-extra-20261019
+Social Network,ca-HepPh,2,overloaded,0.016126875,4934,0.04164099621061871,False,1.0301465689540306,True,474,0.005191,0.001915,0.008576,0,,social-extra-20261019
+Social Network,ca-HepPh,4,overloaded,0.01252666,31755,0.2679995611406966,False,1.4073950699533644,True,288,0.005905,0.000849,0.005561,0,,social-extra-20261019
+Social Network,ca-HepPh,8,out_of_memory,,,,,,,,,,,-6,"usage: ./gkway graph_file num_partition 
+terminate called after throwing an instance of 'mgpu::cuda_exception_t'
+  what():  out of memory
+",social-extra-20261019
+Social Network,ca-HepPh,16,skipped_after_oom,,,,,,,,,,,,Dataset excluded after an out-of-memory failure,social-extra-20261019
+Social Network,ca-HepPh,32,skipped_after_oom,,,,,,,,,,,,Dataset excluded after an out-of-memory failure,social-extra-20261019
+Social Network,ca-HepPh,64,skipped_after_oom,,,,,,,,,,,,Dataset excluded after an out-of-memory failure,social-extra-20261019
